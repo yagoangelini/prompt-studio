@@ -1,20 +1,17 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { X, Save, Copy, Check, Heart, Tag, Clock, Sparkles, RotateCcw, Braces, AlertCircle } from 'lucide-react'
+import { X, Save, Copy, Check, Heart, Tag, Sparkles, Braces, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { confirmAction } from '@/components/ui/confirm-dialog'
 import { usePromptStore } from '@/stores/usePromptStore'
-import { cn, parseDbDate } from '@/lib/utils'
-import { formatDistanceToNow } from 'date-fns'
-import { ptBR } from 'date-fns/locale'
+import { cn } from '@/lib/utils'
 import { extractVariables, substituteVariables, variableToken } from '../templates/template-variables'
 import {
   EMPTY_PROMPT_FORM,
@@ -30,6 +27,8 @@ import {
   type PromptFormState
 } from './prompt-editor-utils'
 import { useEditorDirtySync } from './use-editor-dirty-sync'
+import { ContentEditorField } from './content-editor-field'
+import { PromptVersionHistory } from './prompt-version-history'
 import type { CreatePromptData, PromptVersion, UpdatePromptData } from '@/types'
 
 interface PromptEditorProps {
@@ -42,11 +41,21 @@ type EditorTab = 'content' | 'metadata' | 'history'
 // Clearing a field must reach the database as NULL (undefined would mean "leave it unchanged")
 type PromptUpdatePayload = Omit<UpdatePromptData, 'description'> & { description: string | null }
 
-const formatRelative = (dateString: string) => {
+// A new prompt starts in the category being filtered (e.g. an open sequence), so it doesn't leave the list
+const newPromptForm = (): PromptFormState => {
+  const { searchFilters, categories } = usePromptStore.getState()
+  const categoryId = searchFilters.categoryId ?? null
+  return categoryId !== null && categories.some((category) => category.id === categoryId)
+    ? { ...EMPTY_PROMPT_FORM, category_id: categoryId }
+    : EMPTY_PROMPT_FORM
+}
+
+// When the check itself fails, the normal save runs and reports its own error
+const promptStillExists = async (id: number): Promise<boolean> => {
   try {
-    return formatDistanceToNow(parseDbDate(dateString), { addSuffix: true, locale: ptBR })
+    return (await window.electronAPI.getPrompt(id)) !== null
   } catch {
-    return 'data desconhecida'
+    return true
   }
 }
 
@@ -68,19 +77,20 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
 
   // A stored draft is restored only for the prompt it belongs to (or for a new prompt), so unsaved
   // edits survive closing the app
-  const formForOpening = (prompt: typeof selectedPrompt): PromptFormState => {
+  const baselineFor = (prompt: typeof selectedPrompt): PromptFormState =>
+    prompt ? formFromPrompt(prompt) : newPromptForm()
+
+  const formForOpening = (prompt: typeof selectedPrompt, base: PromptFormState): PromptFormState => {
     const stored = getDraftFormData()
     const draft = normalizeDraft(stored)
     const owner = draftOwnerId(stored)
-    if (prompt) return draft && owner === prompt.id ? draft : formFromPrompt(prompt)
-    return draft && owner === null ? draft : EMPTY_PROMPT_FORM
+    if (prompt) return draft && owner === prompt.id ? draft : base
+    return draft && owner === null ? draft : base
   }
 
-  const [formData, setFormData] = useState<PromptFormState>(() => formForOpening(selectedPrompt))
   // What the form is compared against to know whether there are unsaved changes
-  const [baseline, setBaseline] = useState<PromptFormState>(() =>
-    selectedPrompt ? formFromPrompt(selectedPrompt) : EMPTY_PROMPT_FORM
-  )
+  const [baseline, setBaseline] = useState<PromptFormState>(() => baselineFor(selectedPrompt))
+  const [formData, setFormData] = useState<PromptFormState>(() => formForOpening(selectedPrompt, baseline))
   const [activeTab, setActiveTab] = useState<EditorTab>('content')
   const [newTag, setNewTag] = useState('')
   const [tagMessage, setTagMessage] = useState<string | null>(null)
@@ -93,6 +103,7 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
   const formRef = useRef(formData)
   formRef.current = formData
   const savingRef = useRef(false)
+  const variablesSectionRef = useRef<HTMLElement>(null)
 
   const promptId = selectedPrompt?.id ?? null
   const isNew = selectedPrompt === null
@@ -106,10 +117,11 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
   // Re-initialize only when another prompt (or a new one) is opened. Updates to the same prompt made
   // elsewhere (favorite toggled on a card, category renamed or deleted) must not wipe what is being typed.
   useEffect(() => {
-    const next = formForOpening(selectedPrompt)
+    const base = baselineFor(selectedPrompt)
+    const next = formForOpening(selectedPrompt, base)
     formRef.current = next
     setFormData(next)
-    setBaseline(selectedPrompt ? formFromPrompt(selectedPrompt) : EMPTY_PROMPT_FORM)
+    setBaseline(base)
     setActiveTab('content')
     setVersions(null)
     setVersionsError(null)
@@ -144,8 +156,8 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
       const draft = normalizeDraft(getDraftFormData())
       // A different draft was just provided (e.g. "Usar template"); otherwise the draft is the discarded text.
       // Compare with this render's form: the draft effect above may already have replaced formRef.current.
-      const next = draft && !sameForm(draft, formData) ? draft : EMPTY_PROMPT_FORM
-      if (next === EMPTY_PROMPT_FORM) clearDraftFormData()
+      const next = draft && !sameForm(draft, formData) ? draft : baseline
+      if (next === baseline) clearDraftFormData()
       formRef.current = next
       setFormData(next)
     }
@@ -239,8 +251,27 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
     try {
       const tags = tagsWithPending(formData.tags, newTag)
       const description = formData.description.trim() ? formData.description : null
+      const createData: CreatePromptData = {
+        title: titleCheck.title,
+        content: formData.content,
+        description: description ?? undefined,
+        category_id: effectiveCategoryId,
+        template_id: effectiveTemplateId,
+        tags,
+        is_favorite: formData.is_favorite
+      }
+      // The prompt may have been deleted meanwhile (another window, bulk actions): keep the text as a new prompt
+      const deletedMeanwhile = selectedPrompt !== null && !(await promptStillExists(selectedPrompt.id))
       let saved: boolean
-      if (selectedPrompt) {
+      if (deletedMeanwhile) {
+        const confirmed = await confirmAction({
+          title: 'Este prompt foi excluído',
+          description: 'O prompt que você está editando não existe mais. Deseja salvar o texto como um novo prompt?',
+          confirmLabel: 'Salvar como novo prompt'
+        })
+        if (!confirmed) return
+        saved = await createPrompt(createData)
+      } else if (selectedPrompt) {
         const updateData: PromptUpdatePayload = {
           title: titleCheck.title,
           content: formData.content,
@@ -252,15 +283,6 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
         }
         saved = await updatePrompt(selectedPrompt.id, updateData as UpdatePromptData)
       } else {
-        const createData: CreatePromptData = {
-          title: titleCheck.title,
-          content: formData.content,
-          description: description ?? undefined,
-          category_id: effectiveCategoryId,
-          template_id: effectiveTemplateId,
-          tags,
-          is_favorite: formData.is_favorite
-        }
         saved = await createPrompt(createData)
       }
       // On failure the store already showed the error; the editor stays open with everything typed
@@ -343,6 +365,13 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
     setVariableValues(new Map())
   }
 
+  const showVariablesSection = () => {
+    const section = variablesSectionRef.current
+    if (!section) return
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    section.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
+  }
+
   const handleVariableValueChange = (name: string, value: string) => {
     setVariableValues((previous) => new Map(previous).set(name, value))
   }
@@ -367,8 +396,6 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
       description: `O conteúdo da versão ${version.version_number} foi colocado no formulário. Salve para criar uma nova versão.`
     })
   }
-
-  const latestVersionNumber = versions && versions.length > 0 ? versions[0]?.version_number : undefined
 
   return (
     <div
@@ -502,32 +529,43 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
               )}
 
               {/* Content */}
-              <div className="space-y-2">
-                <Label htmlFor="content">
-                  Conteúdo <span className="text-destructive" aria-hidden="true">*</span>
-                </Label>
-                <Textarea
-                  id="content"
-                  placeholder="Digite o conteúdo do prompt..."
-                  value={formData.content}
-                  aria-required="true"
-                  onChange={(e) => updateForm({ content: e.target.value })}
-                  className="min-h-[300px] resize-y"
-                />
-                <div className="text-xs text-muted-foreground">
-                  {formData.content.length} {formData.content.length === 1 ? 'caractere' : 'caracteres'}
-                </div>
-              </div>
+              <ContentEditorField
+                key={promptId ?? 'new'}
+                id="content"
+                label={<>Conteúdo <span className="text-destructive" aria-hidden="true">*</span></>}
+                placeholder="Digite o conteúdo do prompt... Use {{nomeDaVariavel}} para variáveis."
+                value={formData.content}
+                required
+                onChange={(content) => updateForm({ content })}
+                toolbar={
+                  contentVariables.length > 0 ? (
+                    // The fill-in section sits below the (tall) text: this link brings it into view
+                    <button
+                      type="button"
+                      onClick={showVariablesSection}
+                      className="inline-flex items-center gap-1 rounded-sm text-xs font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <Braces className="h-3.5 w-3.5" aria-hidden="true" />
+                      Preencher {contentVariables.length} {contentVariables.length === 1 ? 'variável' : 'variáveis'}
+                    </button>
+                  ) : null
+                }
+              />
 
               {/* Fill in the {{variables}} of the content */}
               {contentVariables.length > 0 && (
-                <div className="space-y-3 rounded-lg border p-3">
+                <section
+                  ref={variablesSectionRef}
+                  aria-labelledby="fill-variables-title"
+                  className="space-y-3 rounded-lg border p-3 scroll-mt-4"
+                >
                   <div className="flex items-center gap-2">
                     <Braces className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                    <h3 className="text-sm font-medium">Preencher variáveis</h3>
+                    <h3 id="fill-variables-title" className="text-sm font-medium">Preencher variáveis</h3>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Preencha os valores e clique em "Aplicar valores" para substituí-los no conteúdo. Variáveis sem valor continuam no texto.
+                    Se preferir, deixe as variáveis no prompt: ao copiá-lo, o Prompt Studio pede os valores a cada uso.
                   </p>
                   <div className="space-y-2">
                     {contentVariables.map((name, index) => (
@@ -559,7 +597,7 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
                   >
                     Aplicar valores
                   </Button>
-                </div>
+                </section>
               )}
 
               {/* Description */}
@@ -673,74 +711,14 @@ export function PromptEditor({ compact = false, onClose }: PromptEditorProps) {
 
             {selectedPrompt && (
               <TabsContent value="history" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-base flex items-center space-x-2">
-                      <Clock className="h-4 w-4" />
-                      <span>Histórico de versões</span>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="space-y-2 text-sm text-muted-foreground">
-                      <div className="flex items-center justify-between gap-2">
-                        <span>Criado:</span>
-                        <span>{formatRelative(selectedPrompt.created_at)}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span>Última modificação:</span>
-                        <span>{formatRelative(selectedPrompt.updated_at)}</span>
-                      </div>
-                    </div>
-
-                    <p className="text-xs text-muted-foreground">
-                      Uma nova versão é salva sempre que o conteúdo muda. Restaurar coloca o conteúdo da versão no formulário; salve para mantê-lo.
-                    </p>
-
-                    {versions === null ? (
-                      <p className="text-sm text-muted-foreground">Carregando...</p>
-                    ) : versionsError ? (
-                      <p className="text-sm text-destructive">{versionsError}</p>
-                    ) : versions.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">Nenhuma versão salva ainda.</p>
-                    ) : (
-                      <ul className="space-y-3" aria-label="Versões do prompt">
-                        {versions.map((version) => {
-                          const inForm = version.content === formData.content
-                          return (
-                            <li key={version.id} className="rounded-lg border p-3 space-y-2 min-w-0">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span className="text-sm font-medium">Versão {version.version_number}</span>
-                                  {version.version_number === latestVersionNumber && (
-                                    <Badge variant="outline" className="text-[10px]">Atual</Badge>
-                                  )}
-                                  <span className="text-xs text-muted-foreground truncate">
-                                    {formatRelative(version.created_at)}
-                                  </span>
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleRestoreVersion(version)}
-                                  disabled={inForm}
-                                  title={inForm ? 'Este conteúdo já está no formulário' : undefined}
-                                  aria-label={`Restaurar a versão ${version.version_number}`}
-                                >
-                                  <RotateCcw className="h-3.5 w-3.5 mr-1" />
-                                  Restaurar
-                                </Button>
-                              </div>
-                              <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono line-clamp-4">
-                                {version.content}
-                              </pre>
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    )}
-                  </CardContent>
-                </Card>
+                <PromptVersionHistory
+                  key={selectedPrompt.id}
+                  prompt={selectedPrompt}
+                  versions={versions}
+                  error={versionsError}
+                  currentContent={formData.content}
+                  onRestore={handleRestoreVersion}
+                />
               </TabsContent>
             )}
           </Tabs>

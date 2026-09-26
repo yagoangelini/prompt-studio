@@ -91,6 +91,8 @@ export function AdvancedSearchInput({
     }
   }, [value, tags, categories])
 
+  // Suggestions open while typing only: focusing the field again (Ctrl+K closed, Tab) must not
+  // cover the controls below it
   const handleInputChange = (newValue: string) => {
     onChange(newValue)
     setShowSuggestions(newValue.trim().length > 0)
@@ -195,7 +197,6 @@ export function AdvancedSearchInput({
           value={value}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => setShowSuggestions(value.trim().length > 0 && suggestions.length > 0)}
           onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
           className={cn("pl-9 pr-10", className)}
           data-search-input

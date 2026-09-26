@@ -82,6 +82,11 @@ class PromptStudioApp {
       }
     })
 
+    // Another copy was launched: it quits, this one comes to the front in its current mode
+    app.on('second-instance', () => {
+      void this.showApp()
+    })
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         this.createMainWindow()
@@ -141,16 +146,20 @@ class PromptStudioApp {
     }
   }
 
-  private getMcpStatus(): McpServerStatus {
-    if (this.mcpServer) return this.mcpServer.getStatus()
+  private async getMcpStatus(): Promise<McpServerStatus> {
+    if (this.mcpServer) {
+      // Prompts deleted since the last update (any window or path) no longer count as exposed
+      await this.mcpServer.pruneDeletedPrompts()
+      return this.mcpServer.getStatus()
+    }
     return {
       running: false, port: 0, host: '127.0.0.1', exposedPrompts: 0, connections: 0, uptime: 0,
       requests: 0, errors: 0, logs: [], message: 'O servidor MCP não foi inicializado',
     }
   }
 
-  private broadcastMcpStatus(): void {
-    const status = this.getMcpStatus()
+  private async broadcastMcpStatus(): Promise<void> {
+    const status = await this.getMcpStatus()
     const payload: McpServerStatusEvent = {
       running: status.running,
       port: status.running ? status.port : null,
@@ -706,7 +715,7 @@ class PromptStudioApp {
         // The exposed prompt ids no longer exist after the reset
         if (this.mcpServer?.isRunning()) {
           await this.mcpServer.stop()
-          this.broadcastMcpStatus()
+          await this.broadcastMcpStatus()
         }
         await factoryReset()
         // Reinitialize database to load sample data
@@ -886,10 +895,11 @@ class PromptStudioApp {
 
       this.mcpServer.updateConfig(config)
       this.mcpServer.updateExposedPrompts(exposedPrompts)
+      await this.mcpServer.pruneDeletedPrompts()
 
       const result = await this.mcpServer.start()
       console.log('MCP Server start result:', result)
-      this.broadcastMcpStatus()
+      await this.broadcastMcpStatus()
       return result
     })
 
@@ -899,12 +909,12 @@ class PromptStudioApp {
       }
 
       const result = await this.mcpServer.stop()
-      this.broadcastMcpStatus()
+      await this.broadcastMcpStatus()
       return result
     })
 
     ipcMain.handle('mcp-server:status', async (): Promise<McpServerStatus> => {
-      return this.getMcpStatus()
+      return await this.getMcpStatus()
     })
 
     ipcMain.handle('mcp-server:update-config', async (_event, config: unknown) => {
@@ -921,9 +931,10 @@ class PromptStudioApp {
         return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
 
-      const count = this.mcpServer.updateExposedPrompts(exposedPrompts)
-      this.broadcastMcpStatus()
-      return { success: true, exposedPrompts: count }
+      this.mcpServer.updateExposedPrompts(exposedPrompts)
+      // The broadcast also drops ids of deleted prompts, so the count below only has existing prompts
+      await this.broadcastMcpStatus()
+      return { success: true, exposedPrompts: this.mcpServer.getStatus().exposedPrompts }
     })
 
     ipcMain.handle('mcp-server:clear-logs', async () => {
@@ -937,5 +948,11 @@ class PromptStudioApp {
   }
 }
 
-// Initialize the application
-new PromptStudioApp()
+// Initialize the application. One instance per userData folder (Electron keeps the lock there, so
+// test runs with their own --user-data-dir still start side by side): a second launch quits and the
+// first instance shows itself instead (see 'second-instance')
+if (app.requestSingleInstanceLock()) {
+  new PromptStudioApp()
+} else {
+  app.quit()
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Search, Plus, X, Heart, Filter, Palette, Wifi, WifiOff, Play, Square, AppWindow } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,6 +10,10 @@ import { PromptEditor } from '../prompts/prompt-editor'
 import { usePromptStore } from '@/stores/usePromptStore'
 import { useTheme, type Theme } from '@/contexts/theme-context'
 import { cn } from '@/lib/utils'
+import { isTextField } from '@/hooks/use-keyboard-shortcuts'
+import { detectShortcutPlatform, formatAccelerator } from '@/components/quick-paste/accelerator'
+import { QUICK_PASTE_CHANNELS, type QuickPasteStatus } from '@/components/quick-paste/quick-paste-types'
+import type { QuickPasteSettings } from '@/types'
 import AppIcon from '/assets/icon.png'
 
 // localStorage keys where the store persists the MCP settings (shared by both windows)
@@ -17,6 +21,12 @@ const MCP_CONFIG_KEY = 'promptStudio_mcpConfig'
 const MCP_EXPOSED_PROMPTS_KEY = 'promptStudio_mcpExposedPrompts'
 
 const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+const shortcutPlatform = detectShortcutPlatform()
+
+// Cards of the list, in order (MenubarPromptCard marks its root with data-menubar-card)
+const CARD_SELECTOR = '[data-menubar-card]'
+// Widgets that handle their own keys (theme menu, dialogs)
+const OWN_KEYS_SELECTOR = '[role="menu"], [role="dialog"], [role="alertdialog"], [role="listbox"]'
 
 const allThemes: { value: Theme; label: string; emoji: string }[] = [
   { value: 'system', label: 'Sistema', emoji: '🖥️' },
@@ -65,6 +75,12 @@ export function MenuBarLayout() {
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [mcpServerStatus, setMcpServerStatus] = useState({ running: false, port: 0 })
   const [isLoading, setIsLoading] = useState(false)
+  const [quickPaste, setQuickPaste] = useState<QuickPasteSettings | null>(null)
+  // The footer hint only shows a shortcut that is really registered (it may be taken by another program)
+  const [quickPasteRegistered, setQuickPasteRegistered] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const searchQueryRef = useRef(searchQuery)
+  searchQueryRef.current = searchQuery
 
   const { theme, setTheme } = useTheme()
 
@@ -129,6 +145,24 @@ export function MenuBarLayout() {
     }
   }
 
+  const refreshQuickPaste = useCallback(async () => {
+    try {
+      const [settings, status] = await Promise.all([
+        window.electronAPI.getQuickPasteSettings(),
+        window.electronAPI.invoke(QUICK_PASTE_CHANNELS.getStatus) as Promise<QuickPasteStatus | undefined>,
+      ])
+      setQuickPaste(settings)
+      setQuickPasteRegistered(status?.registered === true)
+    } catch (error) {
+      console.error('Failed to read the quick paste settings:', error)
+      setQuickPasteRegistered(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshQuickPaste()
+  }, [refreshQuickPaste])
+
   const refreshMcpStatus = useCallback(async () => {
     try {
       const status = await window.electronAPI.getMcpServerStatus()
@@ -159,8 +193,81 @@ export function MenuBarLayout() {
       syncMcpSettingsFromStorage()
       void fetchAllData()
       void refreshMcpStatus()
+      void refreshQuickPaste()
+      // Ready to type: the search keeps its text, so the previous filter is still there
+      if (!usePromptStore.getState().isPromptEditorOpen) searchInputRef.current?.focus()
     })
-  }, [fetchAllData, refreshMcpStatus])
+  }, [fetchAllData, refreshMcpStatus, refreshQuickPaste])
+
+  // Keyboard: ↑/↓ (and Home/End) move between the cards, Enter on a card copies it (MenubarPromptCard),
+  // "/" focuses the search (Ctrl+F too, app-wide), Esc clears the search and, when it is empty, hides
+  // the popup
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return
+      if (event.ctrlKey || event.metaKey || event.altKey) return
+      if (usePromptStore.getState().isPromptEditorOpen) return
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (target?.closest(OWN_KEYS_SELECTOR)) return
+
+      const search = searchInputRef.current
+      const cards = Array.from(document.querySelectorAll<HTMLElement>(CARD_SELECTOR))
+      const currentCard = target?.closest<HTMLElement>(CARD_SELECTOR) ?? null
+      const index = currentCard ? cards.indexOf(currentCard) : -1
+      const focusCard = (next: number) => {
+        const card = cards[next]
+        if (!card) return
+        card.focus()
+        card.scrollIntoView({ block: 'nearest' })
+      }
+
+      switch (event.key) {
+        case 'ArrowDown':
+          if (index >= 0 || target === search || !isTextField(target)) {
+            event.preventDefault()
+            focusCard(index + 1)
+          }
+          return
+        case 'ArrowUp':
+          if (index > 0) {
+            event.preventDefault()
+            focusCard(index - 1)
+          } else if (index === 0) {
+            event.preventDefault()
+            search?.focus()
+          }
+          return
+        case 'Home':
+        case 'End':
+          if (index >= 0) {
+            event.preventDefault()
+            focusCard(event.key === 'Home' ? 0 : cards.length - 1)
+          }
+          return
+        case '/':
+          if (!event.shiftKey && !isTextField(target)) {
+            event.preventDefault()
+            search?.focus()
+            search?.select()
+          }
+          return
+        case 'Escape':
+          if (event.shiftKey) return
+          event.preventDefault()
+          if (searchQueryRef.current) {
+            handleSearch('')
+            search?.focus()
+          } else {
+            void window.electronAPI.invoke(QUICK_PASTE_CHANNELS.hideMenuBar).catch((error: unknown) => {
+              console.error('Failed to hide the menu bar popup:', error)
+            })
+          }
+          return
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  })
 
   // MCP settings changed in the desktop window while this popup is loaded
   useEffect(() => {
@@ -365,6 +472,7 @@ export function MenuBarLayout() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
               <Input
+                ref={searchInputRef}
                 placeholder="Buscar prompts..."
                 aria-label="Buscar prompts"
                 value={searchQuery}
@@ -498,7 +606,21 @@ export function MenuBarLayout() {
       </ScrollArea>
 
       {/* Footer */}
-      <div className="border-t p-2">
+      <div className="border-t p-2 space-y-1">
+        <p className="text-[11px] text-muted-foreground text-center truncate">
+          ↑ ↓ navegar · Enter copiar · / buscar · Esc fechar
+        </p>
+        {quickPaste?.enabled && quickPasteRegistered && (
+          <p
+            className="text-[11px] text-muted-foreground text-center truncate"
+            title="Atalho global: abre a lista de prompts em qualquer programa e cola o escolhido onde o cursor estava"
+          >
+            Colar rápido em qualquer programa:{' '}
+            <kbd className="rounded border bg-muted px-1 font-mono text-[10px] text-foreground">
+              {formatAccelerator(quickPaste.shortcut, shortcutPlatform)}
+            </kbd>
+          </p>
+        )}
         <Button
           variant="ghost"
           size="sm"

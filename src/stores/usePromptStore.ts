@@ -10,6 +10,12 @@ import {
 import { generateSecureHash } from '@/lib/secure-hash'
 import { parseDbDate } from '@/lib/utils'
 import { confirmAction } from '@/components/ui/confirm-dialog'
+import {
+  compareSequenceSteps,
+  getSequenceSteps,
+  rangeBetween,
+  withDescendants
+} from '@/components/organization/organization-utils'
 import type {
   Prompt,
   Category,
@@ -22,21 +28,21 @@ import type {
   UpdateTemplateData,
   SearchFilters,
   SortOptions,
-  ToastMessage
+  ToastMessage,
+  BulkPromptChanges
 } from '@/types'
 
-// MCP Types
+// MCP Types. The server always listens on 127.0.0.1: older versions also kept "host" and
+// "allowedOrigins" here, which were never used (see getStoredMcpConfig)
 interface McpServerConfig {
   name: string
   description: string
   port: number
-  host: string
   enableAuth: boolean
   apiKey: string
   maxConnections: number
   rateLimit: number
   enableCors: boolean
-  allowedOrigins: string[]
   enableLogging: boolean
   logLevel: 'debug' | 'info' | 'warn' | 'error'
 }
@@ -96,6 +102,21 @@ interface PromptStore {
   // MCP Server
   mcpConfig: McpServerConfig
   exposedPrompts: readonly ExposedPrompt[]
+  // Text of the MCP port field while it is not a valid port (null when the field shows mcpConfig.port).
+  // Not saved. While it is set, the server is not started (see getMcpPortError)
+  mcpPortDraft: string | null
+
+  // Selection mode of the prompt list (bulk actions)
+  isSelectionMode: boolean
+  selectedPromptIds: readonly number[]
+  // Last prompt clicked without Shift: start of a Shift+click range
+  selectionAnchorId: number | null
+
+  // Sequences: id of the last step copied, per category id (kept in localStorage)
+  sequenceProgress: Readonly<Record<string, number>>
+
+  // Categories whose subcategories are hidden in the sidebar (kept in localStorage)
+  collapsedCategoryIds: readonly number[]
 
   // Actions
   // Data fetching
@@ -145,6 +166,7 @@ interface PromptStore {
 
   // MCP Server actions
   updateMcpConfig: (config: Partial<McpServerConfig>) => void
+  setMcpPortDraft: (draft: string | null) => void
   togglePromptExposure: (promptId: number) => void
   setPromptExposure: (promptId: number, exposed: boolean) => void
   getExposedPrompts: () => readonly ExposedPrompt[]
@@ -185,12 +207,49 @@ interface PromptStore {
   // Error handling
   setError: (error: string | null) => void
   clearError: () => void
+
+  // Organization: pin, sequences, bulk actions
+  setPromptPinned: (id: number, pinned: boolean) => Promise<boolean>
+  // Sequence category shown by the current filter (categoria:<a sequence>), or null
+  getActiveSequenceCategory: () => Category | null
+  // Every prompt of the category, in step order
+  getSequenceSteps: (categoryId: number) => readonly Prompt[]
+  // Saves a new step order (optimistic: the list changes at once and returns on failure)
+  reorderSequence: (categoryId: number, orderedIds: readonly number[]) => Promise<boolean>
+  // The step after the last one copied (the first when none was copied); null when all were copied
+  getNextSequenceStep: (categoryId: number) => Prompt | null
+  markSequenceStepCopied: (prompt: Pick<Prompt, 'id' | 'category_id'>) => void
+  resetSequenceProgress: (categoryId: number) => void
+  bulkUpdatePrompts: (ids: readonly number[], changes: BulkPromptChanges) => Promise<boolean>
+  bulkDeletePrompts: (ids: readonly number[]) => Promise<boolean>
+  setPromptsExposure: (ids: readonly number[], exposed: boolean) => Promise<void>
+
+  // Selection mode
+  setSelectionMode: (active: boolean) => void
+  // Click on a prompt in selection mode. With `range`, selects everything from the anchor to it in `orderedIds`.
+  togglePromptSelection: (id: number, options?: { range?: boolean; orderedIds?: readonly number[] }) => void
+  setSelectedPromptIds: (ids: readonly number[]) => void
+  clearSelection: () => void
+
+  // Sidebar tree
+  toggleCategoryCollapsed: (categoryId: number) => void
 }
 
 export type MainTab = 'prompts' | 'templates' | 'testing' | 'mcp'
 export type SettingsTab = 'categories' | 'tags' | 'general' | 'data'
 
 export const SETTINGS_TABS: readonly SettingsTab[] = ['categories', 'tags', 'general', 'data']
+
+export const isValidMcpPort = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535
+
+// Why "Iniciar servidor" must not run, or null. Checked by every start button (MCP panel, header,
+// command palette): with an invalid value in the port field the server must not start on the last
+// valid port instead.
+export const getMcpPortError = (state: Pick<PromptStore, 'mcpConfig' | 'mcpPortDraft'>): string | null =>
+  state.mcpPortDraft !== null || !isValidMcpPort(state.mcpConfig.port)
+    ? 'A porta do servidor MCP é inválida. Corrija-a na aba Servidor MCP > Configuração com um número inteiro entre 1 e 65535. O servidor não foi iniciado.'
+    : null
 
 // Raw SQLite errors ("SQLITE_BUSY: database is locked") become pt-BR messages; the backend's own
 // pt-BR messages (e.g. "Já existe uma categoria chamada …") pass through unchanged
@@ -221,7 +280,9 @@ const STORAGE_KEYS = {
   SORT_OPTIONS: 'promptStudio_sortOptions',
   MCP_CONFIG: 'promptStudio_mcpConfig',
   MCP_EXPOSED_PROMPTS: 'promptStudio_mcpExposedPrompts',
-  RECENT_PROMPTS: 'recentlyInteractedPrompts'
+  RECENT_PROMPTS: 'recentlyInteractedPrompts',
+  SEQUENCE_PROGRESS: 'promptStudio_sequenceProgress',
+  COLLAPSED_CATEGORIES: 'promptStudio_collapsedCategories'
 }
 
 type StorageKind = 'local' | 'session'
@@ -304,15 +365,29 @@ const persistViewMode = (key: string, mode: 'list' | 'grid') => {
 
 const DEFAULT_SORT_OPTIONS: SortOptions = { field: 'updated_at', direction: 'desc' }
 
+const SORT_FIELDS: readonly SortOptions['field'][] = ['updated_at', 'created_at', 'title', 'usage_count', 'last_used_at']
+
 const getStoredSortOptions = (): SortOptions => {
   const stored = readStored<Partial<SortOptions> | null>('local', STORAGE_KEYS.SORT_OPTIONS, null)
   const field = stored?.field
   const direction = stored?.direction
-  if ((field === 'updated_at' || field === 'created_at' || field === 'title') &&
-      (direction === 'asc' || direction === 'desc')) {
+  if (field && SORT_FIELDS.includes(field) && (direction === 'asc' || direction === 'desc')) {
     return { field, direction }
   }
   return DEFAULT_SORT_OPTIONS
+}
+
+const getStoredSequenceProgress = (): Record<string, number> => {
+  const stored = readStored<unknown>('local', STORAGE_KEYS.SEQUENCE_PROGRESS, {})
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {}
+  return Object.fromEntries(
+    Object.entries(stored).filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+  )
+}
+
+const getStoredCollapsedCategories = (): number[] => {
+  const stored = readStored<unknown>('local', STORAGE_KEYS.COLLAPSED_CATEGORIES, [])
+  return Array.isArray(stored) ? stored.filter((id): id is number => typeof id === 'number') : []
 }
 
 // MCP persistence helpers
@@ -320,19 +395,42 @@ const DEFAULT_MCP_CONFIG: McpServerConfig = {
   name: 'Servidor MCP do Prompt Studio',
   description: 'Expõe a biblioteca de prompts como ferramentas e recursos MCP',
   port: 3000,
-  host: '127.0.0.1',
   enableAuth: true,
   apiKey: '',
   maxConnections: 100,
   rateLimit: 60,
   enableCors: true,
-  allowedOrigins: ['*'],
   enableLogging: true,
   logLevel: 'info'
 }
 
-const getStoredMcpConfig = (): McpServerConfig =>
-  readStored('local', STORAGE_KEYS.MCP_CONFIG, { ...DEFAULT_MCP_CONFIG, allowedOrigins: ['*'] })
+const MCP_LOG_LEVELS: readonly string[] = ['debug', 'info', 'warn', 'error']
+
+// Settings saved by any version: known fields only (older versions also saved "host" and
+// "allowedOrigins", which are dropped); a missing or malformed field takes the default
+const getStoredMcpConfig = (): McpServerConfig => {
+  const stored = readStored<unknown>('local', STORAGE_KEYS.MCP_CONFIG, null)
+  const raw = stored !== null && typeof stored === 'object' && !Array.isArray(stored)
+    ? stored as Record<string, unknown>
+    : {}
+  const text = (key: 'name' | 'description' | 'apiKey') => typeof raw[key] === 'string' ? raw[key] as string : DEFAULT_MCP_CONFIG[key]
+  const number = (key: 'port' | 'maxConnections' | 'rateLimit') => typeof raw[key] === 'number' ? raw[key] as number : DEFAULT_MCP_CONFIG[key]
+  const flag = (key: 'enableAuth' | 'enableCors' | 'enableLogging') => typeof raw[key] === 'boolean' ? raw[key] as boolean : DEFAULT_MCP_CONFIG[key]
+  return {
+    name: text('name'),
+    description: text('description'),
+    port: number('port'),
+    enableAuth: flag('enableAuth'),
+    apiKey: text('apiKey'),
+    maxConnections: number('maxConnections'),
+    rateLimit: number('rateLimit'),
+    enableCors: flag('enableCors'),
+    enableLogging: flag('enableLogging'),
+    logLevel: typeof raw.logLevel === 'string' && MCP_LOG_LEVELS.includes(raw.logLevel)
+      ? raw.logLevel as McpServerConfig['logLevel']
+      : DEFAULT_MCP_CONFIG.logLevel
+  }
+}
 
 const getStoredExposedPrompts = (): ExposedPrompt[] => {
   const stored = readStored<unknown>('local', STORAGE_KEYS.MCP_EXPOSED_PROMPTS, [])
@@ -402,6 +500,19 @@ export function resolveCategoryIds(value: string, categories: readonly Category[
   return new Set(matches.map(c => c.id))
 }
 
+/**
+ * The sequence category shown by a query: only when "categoria:" selects exactly one category and it is a
+ * sequence. Its prompts are then listed in step order.
+ */
+export function getSequenceCategoryForQuery(query: string, categories: readonly Category[]): Category | null {
+  const parsed = parseSearchQuery(query)
+  if (!parsed.category) return null
+  const ids = [...resolveCategoryIds(parsed.category, categories)]
+  if (ids.length !== 1) return null
+  const category = categories.find(c => c.id === ids[0])
+  return category?.is_sequence ? category : null
+}
+
 // Builds the search filters from the query; the other fields only mirror it
 const deriveSearchFilters = (query: string, categories: readonly Category[]): SearchFilters => {
   const parsed = parseSearchQuery(query)
@@ -436,6 +547,20 @@ const getSearchableText = (prompt: Prompt): SearchableText => {
 }
 
 const toTimestamp = (value: string): number => parseDbDate(value).getTime() || 0
+
+// Sorts by the chosen option, then moves the pinned prompts to the top (both steps keep ties in order)
+const sortWithPinnedFirst = (prompts: Prompt[], { field, direction }: SortOptions): Prompt[] => {
+  const factor = direction === 'asc' ? 1 : -1
+  prompts.sort((a, b) => {
+    const result = field === 'title'
+      ? nameCollator.compare(a.title, b.title)
+      : field === 'usage_count'
+        ? (a.usage_count ?? 0) - (b.usage_count ?? 0)
+        : toTimestamp(a[field] ?? '') - toTimestamp(b[field] ?? '')
+    return result * factor
+  })
+  return [...prompts.filter(p => p.is_pinned), ...prompts.filter(p => !p.is_pinned)]
+}
 
 export const usePromptStore = create<PromptStore>()(
   devtools(
@@ -474,26 +599,33 @@ export const usePromptStore = create<PromptStore>()(
         return true
       }
 
-      // Removes the prompt from the MCP exposure list and, if the server is running, updates it
-      const removePromptExposure = async (promptId: number) => {
-        const { exposedPrompts } = get()
-        const removed = exposedPrompts.find(p => p.id === promptId)
-        if (!removed) return
-        const updated = exposedPrompts.filter(p => p.id !== promptId)
+      // Replaces the MCP exposure list and, if the server is running, sends it the exposed prompts that still exist
+      const replaceExposures = async (updated: readonly ExposedPrompt[], notifyServer = true) => {
         set({ exposedPrompts: updated })
         persistExposedPrompts(updated)
-        if (!removed.exposed) return
+        if (!notifyServer) return
         try {
           const status = await window.electronAPI.getMcpServerStatus()
           if (status.running) {
-            await window.electronAPI.updateMcpServerExposedPrompts(updated.filter(p => p.exposed))
+            const promptIds = new Set(get().prompts.map(p => p.id))
+            await window.electronAPI.updateMcpServerExposedPrompts(
+              updated.filter(p => p.exposed && Boolean(p.secureHash) && promptIds.has(p.id))
+            )
           }
         } catch (error) {
           console.error('Failed to update the MCP server exposed prompts:', error)
         }
       }
 
-      const showError = (error: unknown, fallback: string) => {
+      // Deleted prompts leave the MCP exposure list (the running server is updated if one of them was exposed)
+      const removePromptExposures = async (ids: ReadonlySet<number>) => {
+        const { exposedPrompts } = get()
+        const removed = exposedPrompts.filter(p => ids.has(p.id))
+        if (removed.length === 0) return
+        await replaceExposures(exposedPrompts.filter(p => !ids.has(p.id)), removed.some(p => p.exposed))
+      }
+
+      const showError =(error: unknown, fallback: string) => {
         if (error instanceof Error && error.message.startsWith('SQLITE_')) console.error(error)
         const errorMessage = error instanceof Error ? friendlyErrorMessage(error.message) : fallback
         set({ error: errorMessage, loading: false })
@@ -540,13 +672,32 @@ export const usePromptStore = create<PromptStore>()(
       // MCP Server state
       mcpConfig: getStoredMcpConfig(),
       exposedPrompts: getStoredExposedPrompts(),
+      mcpPortDraft: null,
+
+      isSelectionMode: false,
+      selectedPromptIds: [],
+      selectionAnchorId: null,
+      sequenceProgress: getStoredSequenceProgress(),
+      collapsedCategoryIds: getStoredCollapsedCategories(),
 
       // Data fetching actions
       fetchPrompts: async () => {
         try {
           set({ loading: true, error: null })
           const prompts = await window.electronAPI.getAllPrompts()
-          set({ prompts, loading: false })
+          // The prompt open in the details panel shows the reloaded data too (usage count, pin...). The editor
+          // only starts over when another prompt is opened, so what is being typed is kept.
+          const { selectedPrompt } = get()
+          const reloaded = selectedPrompt ? prompts.find(p => p.id === selectedPrompt.id) : undefined
+          set({ prompts, loading: false, ...(reloaded ? { selectedPrompt: reloaded } : {}) })
+          // Prompts deleted elsewhere (another window, a direct call) also leave the MCP exposure list
+          const existing = new Set(prompts.map(p => p.id))
+          const { exposedPrompts } = get()
+          if (exposedPrompts.some(p => !existing.has(p.id))) {
+            const kept = exposedPrompts.filter(p => existing.has(p.id))
+            set({ exposedPrompts: kept })
+            persistExposedPrompts(kept)
+          }
         } catch (error) {
           showError(error, 'Não foi possível carregar os prompts')
         }
@@ -690,7 +841,7 @@ export const usePromptStore = create<PromptStore>()(
           if (wasSelected && isPromptEditorOpen) {
             clearPersistedEditorState()
           }
-          await removePromptExposure(id)
+          await removePromptExposures(new Set([id]))
           await get().fetchTags()
           get().addToast({
             type: 'success',
@@ -809,6 +960,10 @@ export const usePromptStore = create<PromptStore>()(
             searchFilters: deriveSearchFilters(query, updatedCategories),
             loading: false
           })
+          // A category that became a sequence numbered its prompts in the database
+          if (updatedCategory.is_sequence && previous && !previous.is_sequence) {
+            await get().fetchPrompts()
+          }
           get().addToast({
             type: 'success',
             title: 'Sucesso',
@@ -827,11 +982,17 @@ export const usePromptStore = create<PromptStore>()(
           await window.electronAPI.deleteCategory(id)
           const { categories, prompts, templates, selectedPrompt, selectedTemplate, searchFilters } = get()
           const deletedCategory = categories.find(c => c.id === id)
-          const filteredCategories = categories.filter(c => c.id !== id)
-          // Mirror the database: prompts and templates of the deleted category become uncategorized
+          // Mirror the database: subcategories move up one level...
+          const newParentId = deletedCategory?.parent_id != null && deletedCategory.parent_id !== id
+            ? deletedCategory.parent_id
+            : null
+          const filteredCategories = categories
+            .filter(c => c.id !== id)
+            .map(c => (c.parent_id === id ? { ...c, parent_id: newParentId } : c))
+          // ...and prompts and templates of the deleted category become uncategorized
           const uncategorize = <T extends Prompt | Template>(item: T): T =>
             item.category_id === id
-              ? { ...item, category_id: null, category_name: undefined, category_color: undefined }
+              ? { ...item, category_id: null, category_name: undefined, category_color: undefined, ...('sort_order' in item ? { sort_order: null } : {}) }
               : item
           // A filter on the deleted category is removed from the query
           let query = searchFilters.query
@@ -1007,9 +1168,10 @@ export const usePromptStore = create<PromptStore>()(
           filtered = filtered.filter(prompt => getSearchableText(prompt).content.includes(contentQuery))
         }
 
-        // Category: exact name, or every category containing the value (none -> no results)
+        // Category: exact name, or every category containing the value (none -> no results). The prompts of
+        // their subcategories are included.
         if (parsedQuery.category) {
-          const categoryIds = resolveCategoryIds(parsedQuery.category, categories)
+          const categoryIds = withDescendants(resolveCategoryIds(parsedQuery.category, categories), categories)
           filtered = filtered.filter(prompt => prompt.category_id !== null && categoryIds.has(prompt.category_id))
         }
 
@@ -1025,19 +1187,212 @@ export const usePromptStore = create<PromptStore>()(
           filtered = filtered.filter(prompt => prompt.is_favorite === parsedQuery.isFavorite)
         }
 
-        // Apply sorting
-        const { field, direction } = sortOptions
-        const factor = direction === 'asc' ? 1 : -1
-        filtered.sort((a, b) => {
-          const result = field === 'title'
-            ? nameCollator.compare(a.title, b.title)
-            : field === 'usage_count'
-              ? (a.usage_count ?? 0) - (b.usage_count ?? 0)
-              : toTimestamp(a[field] ?? '') - toTimestamp(b[field] ?? '')
-          return result * factor
-        })
+        // A sequence category lists its steps in order (the sort option does not apply to them); prompts of
+        // its subcategories follow. Elsewhere pinned prompts come first, then the chosen order.
+        const sequence = getSequenceCategoryForQuery(searchFilters.query, categories)
+        if (sequence) {
+          const steps = filtered.filter(prompt => prompt.category_id === sequence.id).sort(compareSequenceSteps)
+          const others = filtered.filter(prompt => prompt.category_id !== sequence.id)
+          return [...steps, ...sortWithPinnedFirst(others, sortOptions)] as readonly Prompt[]
+        }
 
-        return filtered as readonly Prompt[]
+        return sortWithPinnedFirst(filtered, sortOptions) as readonly Prompt[]
+      },
+
+      getActiveSequenceCategory: () => {
+        const { searchFilters, categories } = get()
+        return getSequenceCategoryForQuery(searchFilters.query, categories)
+      },
+
+      getSequenceSteps: (categoryId: number) => getSequenceSteps(categoryId, get().prompts),
+
+      reorderSequence: async (categoryId: number, orderedIds: readonly number[]) => {
+        const previous = get().prompts
+        const position = new Map(orderedIds.map((id, index) => [id, index + 1]))
+        const reposition = (prompt: Prompt): Prompt => {
+          const sortOrder = prompt.category_id === categoryId ? position.get(prompt.id) : undefined
+          return sortOrder !== undefined && sortOrder !== prompt.sort_order ? { ...prompt, sort_order: sortOrder } : prompt
+        }
+        set({ prompts: previous.map(reposition) })
+        try {
+          await window.electronAPI.reorderPrompts(categoryId, [...orderedIds])
+          const { selectedPrompt } = get()
+          if (selectedPrompt) set({ selectedPrompt: reposition(selectedPrompt) })
+          return true
+        } catch (error) {
+          // Back to the order before the move (other changes made meanwhile are kept)
+          const before = new Map(previous.map(p => [p.id, p.sort_order]))
+          set({
+            prompts: get().prompts.map(p => before.has(p.id) && p.category_id === categoryId
+              ? { ...p, sort_order: before.get(p.id) ?? null }
+              : p)
+          })
+          showError(error, 'Não foi possível salvar a nova ordem')
+          return false
+        }
+      },
+
+      getNextSequenceStep: (categoryId: number) => {
+        const steps = getSequenceSteps(categoryId, get().prompts)
+        const lastId = get().sequenceProgress[String(categoryId)]
+        const lastIndex = lastId === undefined ? -1 : steps.findIndex(p => p.id === lastId)
+        return steps[lastIndex + 1] ?? null
+      },
+
+      markSequenceStepCopied: (prompt) => {
+        const { categories, sequenceProgress } = get()
+        if (prompt.category_id === null) return
+        if (!categories.some(c => c.id === prompt.category_id && c.is_sequence)) return
+        const updated = { ...sequenceProgress, [String(prompt.category_id)]: prompt.id }
+        set({ sequenceProgress: updated })
+        writeStored('local', STORAGE_KEYS.SEQUENCE_PROGRESS, updated)
+      },
+
+      resetSequenceProgress: (categoryId: number) => {
+        const rest = { ...get().sequenceProgress }
+        delete rest[String(categoryId)]
+        set({ sequenceProgress: rest })
+        writeStored('local', STORAGE_KEYS.SEQUENCE_PROGRESS, rest)
+      },
+
+      setPromptPinned: async (id: number, pinned: boolean) => {
+        try {
+          const updated = await window.electronAPI.setPromptPinned(id, pinned)
+          const { prompts, selectedPrompt } = get()
+          set({
+            prompts: prompts.map(p => p.id === id ? updated : p),
+            selectedPrompt: selectedPrompt?.id === id ? updated : selectedPrompt
+          })
+          get().addToast({
+            type: 'success',
+            title: pinned ? 'Fixado no topo' : 'Desafixado',
+            description: `"${updated.title}"`,
+            duration: 2500
+          })
+          return true
+        } catch (error) {
+          showError(error, pinned ? 'Não foi possível fixar o prompt' : 'Não foi possível desafixar o prompt')
+          return false
+        }
+      },
+
+      bulkUpdatePrompts: async (ids: readonly number[], changes: BulkPromptChanges) => {
+        if (ids.length === 0) return false
+        try {
+          const result = await window.electronAPI.bulkUpdatePrompts([...ids], changes)
+          if (!result.success) throw new Error(result.error || 'Não foi possível alterar os prompts')
+          // Category names, tags and step positions change together: reload them from the database
+          await Promise.all([get().fetchPrompts(), get().fetchTags()])
+          const count = result.affected
+          get().addToast({
+            type: 'success',
+            title: count === 0
+              ? 'Nenhum prompt precisou ser alterado'
+              : `${count} ${count === 1 ? 'prompt alterado' : 'prompts alterados'}`,
+            duration: 3000
+          })
+          return true
+        } catch (error) {
+          showError(error, 'Não foi possível alterar os prompts')
+          return false
+        }
+      },
+
+      bulkDeletePrompts: async (ids: readonly number[]) => {
+        if (ids.length === 0) return false
+        try {
+          const result = await window.electronAPI.bulkDeletePrompts([...ids])
+          if (!result.success) throw new Error(result.error || 'Não foi possível excluir os prompts')
+          const removed = new Set(ids)
+          const { prompts, selectedPrompt, recentlyInteractedIds, isPromptEditorOpen, selectedPromptIds } = get()
+          const wasSelected = selectedPrompt !== null && removed.has(selectedPrompt.id)
+          const recentIds = recentlyInteractedIds.filter(id => !removed.has(id))
+          persistRecentIds(recentIds)
+          set({
+            prompts: prompts.filter(p => !removed.has(p.id)),
+            recentlyInteractedIds: recentIds,
+            selectedPromptIds: selectedPromptIds.filter(id => !removed.has(id)),
+            ...(wasSelected
+              ? { selectedPrompt: null, isPromptViewerOpen: false, isPromptEditorOpen: false, isEditorDirty: false }
+              : {})
+          })
+          if (wasSelected && isPromptEditorOpen) {
+            clearPersistedEditorState()
+          }
+          await removePromptExposures(removed)
+          await get().fetchTags()
+          const count = result.affected
+          get().addToast({
+            type: 'success',
+            title: `${count} ${count === 1 ? 'prompt excluído' : 'prompts excluídos'}`,
+            duration: 3000
+          })
+          return true
+        } catch (error) {
+          showError(error, 'Não foi possível excluir os prompts')
+          return false
+        }
+      },
+
+      setPromptsExposure: async (ids: readonly number[], exposed: boolean) => {
+        const { exposedPrompts, prompts } = get()
+        const wanted = new Set(ids)
+        const updated: ExposedPrompt[] = exposedPrompts.map(p => wanted.has(p.id) ? { ...p, exposed } : p)
+        if (exposed) {
+          for (const id of ids) {
+            if (updated.some(p => p.id === id)) continue
+            const prompt = prompts.find(p => p.id === id)
+            if (!prompt) continue
+            const secureHash = generateSecureHash(id, prompt.title || 'untitled')
+            updated.push({ id, exposed: true, endpoint: `/prompts/${secureHash}`, secureHash })
+          }
+        }
+        await replaceExposures(updated)
+        const count = ids.length
+        get().addToast({
+          type: 'success',
+          title: exposed
+            ? `${count} ${count === 1 ? 'prompt exposto' : 'prompts expostos'} no servidor MCP`
+            : `${count} ${count === 1 ? 'prompt ocultado' : 'prompts ocultados'} do servidor MCP`,
+          duration: 3000
+        })
+      },
+
+      setSelectionMode: (active: boolean) => {
+        set({ isSelectionMode: active, selectedPromptIds: [], selectionAnchorId: null })
+      },
+
+      togglePromptSelection: (id, options = {}) => {
+        const { selectedPromptIds, selectionAnchorId } = get()
+        if (options.range && options.orderedIds) {
+          const range = rangeBetween(options.orderedIds, selectionAnchorId, id)
+          const merged = new Set([...selectedPromptIds, ...range])
+          set({ selectedPromptIds: [...merged], selectionAnchorId: selectionAnchorId ?? id, isSelectionMode: true })
+          return
+        }
+        const selected = selectedPromptIds.includes(id)
+        set({
+          selectedPromptIds: selected ? selectedPromptIds.filter(x => x !== id) : [...selectedPromptIds, id],
+          selectionAnchorId: id,
+          isSelectionMode: true
+        })
+      },
+
+      setSelectedPromptIds: (ids: readonly number[]) => {
+        set({ selectedPromptIds: [...new Set(ids)], isSelectionMode: true })
+      },
+
+      clearSelection: () => {
+        set({ selectedPromptIds: [], selectionAnchorId: null })
+      },
+
+      toggleCategoryCollapsed: (categoryId: number) => {
+        const { collapsedCategoryIds } = get()
+        const updated = collapsedCategoryIds.includes(categoryId)
+          ? collapsedCategoryIds.filter(id => id !== categoryId)
+          : [...collapsedCategoryIds, categoryId]
+        set({ collapsedCategoryIds: updated })
+        writeStored('local', STORAGE_KEYS.COLLAPSED_CATEGORIES, updated)
       },
 
       getRecentlyInteractedPrompts: () => {
@@ -1244,8 +1599,14 @@ export const usePromptStore = create<PromptStore>()(
           isEditorDirty: false,
           draftFormData: null,
           recentlyInteractedIds: [],
-          mcpConfig: { ...DEFAULT_MCP_CONFIG, allowedOrigins: ['*'] },
-          exposedPrompts: []
+          mcpConfig: { ...DEFAULT_MCP_CONFIG },
+          exposedPrompts: [],
+          mcpPortDraft: null,
+          isSelectionMode: false,
+          selectedPromptIds: [],
+          selectionAnchorId: null,
+          sequenceProgress: {},
+          collapsedCategoryIds: []
         })
       },
 
@@ -1310,6 +1671,10 @@ export const usePromptStore = create<PromptStore>()(
         const newConfig = { ...currentConfig, ...config }
         set({ mcpConfig: newConfig })
         persistMcpConfig(newConfig)
+      },
+
+      setMcpPortDraft: (draft: string | null) => {
+        set({ mcpPortDraft: draft })
       },
 
       togglePromptExposure: (promptId: number) => {

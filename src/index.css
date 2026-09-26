@@ -266,7 +266,30 @@
   body {
     @apply bg-background text-foreground;
   }
-  
+
+  /* Native controls (checkboxes, range sliders, date pickers, scrollbars) follow the theme */
+  :root {
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  /* While a dialog is open, toasts move to the top center and only the newest one shows,
+     so they never cover the dialog's buttons */
+  body:has([role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]) .toast-viewport {
+    top: 0;
+    bottom: auto;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+  }
+
+  body:has([role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]) .toast-viewport > li:not(:last-child) {
+    display: none;
+  }
+
   /* Custom scrollbar */
   ::-webkit-scrollbar {
     width: 6px;

@@ -18,7 +18,7 @@ import type {
 } from '../../src/types'
 
 // Utility function to promisify database operations with transaction support
-const runQuery = (db: Database, sql: string, params: any[] = []): Promise<{ id: number; changes: number }> => {
+export const runQuery = (db: Database, sql: string, params: any[] = []): Promise<{ id: number; changes: number }> => {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
       db.run(sql, params, function(err) {
@@ -32,7 +32,7 @@ const runQuery = (db: Database, sql: string, params: any[] = []): Promise<{ id: 
   })
 }
 
-const getQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promise<T | undefined> => {
+export const getQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promise<T | undefined> => {
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) {
@@ -44,7 +44,7 @@ const getQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promi
   })
 }
 
-const allQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promise<T[]> => {
+export const allQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promise<T[]> => {
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) {
@@ -60,7 +60,7 @@ const allQuery = <T = any>(db: Database, sql: string, params: any[] = []): Promi
 
 // Same rule as the search (src/lib/search-parser.ts normalizeSearchText): case and accents are ignored,
 // so names that the search would treat as one ("Análise" / "analise") can't coexist
-const nameKey = (value: string): string => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trim()
+export const nameKey = (value: string): string => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trim()
 
 const sameName = (a: string, b: string): boolean => nameKey(a) === nameKey(b)
 
@@ -163,6 +163,52 @@ const toTemplate = (row: any): Template => ({
   variables: normalizeTags(row.variables),
 })
 
+// SEQUENCES (categories whose prompts are ordered steps)
+
+const titleCollator = new Intl.Collator('pt-BR', { sensitivity: 'base' })
+
+interface SequenceStepRow {
+  id: number
+  title: string
+  sort_order: number | null
+}
+
+// Step order: manual position first; prompts without one (null) come after them, by title. The renderer
+// uses the same rule (compareSequenceSteps in src/components/organization/organization-utils.ts).
+export const compareSequenceSteps = (a: SequenceStepRow, b: SequenceStepRow): number => {
+  const left = a.sort_order ?? null
+  const right = b.sort_order ?? null
+  if (left !== right) {
+    if (left === null) return 1
+    if (right === null) return -1
+    return left - right
+  }
+  return titleCollator.compare(a.title, b.title) || a.id - b.id
+}
+
+export const isSequenceCategory = async (db: Database, categoryId: number | null | undefined): Promise<boolean> => {
+  if (!categoryId) return false
+  const row = await getQuery<{ is_sequence: number }>(db, 'SELECT is_sequence FROM categories WHERE id = ?', [categoryId])
+  return Boolean(row?.is_sequence)
+}
+
+// Numbers the prompts of a category 1..n in their current step order, so the next prompt can go to the end
+// (n + 1) even when some steps had no position yet. Returns n.
+export const normalizeSequenceOrder = async (db: Database, categoryId: number): Promise<number> => {
+  const rows = await allQuery<SequenceStepRow>(db, 'SELECT id, title, sort_order FROM prompts WHERE category_id = ?', [categoryId])
+  rows.sort(compareSequenceSteps)
+  for (const [index, row] of rows.entries()) {
+    if (row.sort_order !== index + 1) {
+      await runQuery(db, 'UPDATE prompts SET sort_order = ? WHERE id = ?', [index + 1, row.id])
+    }
+  }
+  return rows.length
+}
+
+// Position of a prompt that enters the category: the end of the sequence, or null for other categories
+const positionInCategory = async (db: Database, categoryId: number | null): Promise<number | null> =>
+  categoryId && (await isSequenceCategory(db, categoryId)) ? (await normalizeSequenceOrder(db, categoryId)) + 1 : null
+
 // PROMPTS OPERATIONS
 const PROMPT_SELECT = `
   SELECT p.*, c.name as category_name, c.color as category_color,
@@ -194,18 +240,22 @@ export const createPrompt = async (db: Database, prompt: CreatePromptData): Prom
   const { description, category_id, template_id, tags, is_favorite } = prompt
   const title = requireText(prompt.title, 'O título do prompt é obrigatório').trim()
   const content = requireText(prompt.content, 'O conteúdo do prompt é obrigatório')
+  const categoryId = category_id || null
+  // A new prompt in a sequence category becomes its last step
+  const sortOrder = await positionInCategory(db, categoryId)
   const sql = `
-    INSERT INTO prompts (title, content, description, category_id, template_id, tags, is_favorite)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO prompts (title, content, description, category_id, template_id, tags, is_favorite, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `
   const result = await runQuery(db, sql, [
     title,
     content,
     optionalText(description),
-    category_id || null,
+    categoryId,
     template_id || null,
     JSON.stringify(cleanTags(tags || [])),
-    is_favorite ? 1 : 0
+    is_favorite ? 1 : 0,
+    sortOrder
   ])
 
   // Create initial version
@@ -217,7 +267,7 @@ export const createPrompt = async (db: Database, prompt: CreatePromptData): Prom
 }
 
 export const updatePrompt = async (db: Database, id: number, prompt: UpdatePromptData): Promise<Prompt> => {
-  const { title, content, description, category_id, template_id, tags, is_favorite } = prompt
+  const { title, content, description, category_id, template_id, tags, is_favorite, is_pinned } = prompt
 
   const currentPrompt = await getPrompt(db, id)
   if (!currentPrompt) throw new Error('Prompt não encontrado')
@@ -255,7 +305,11 @@ export const updatePrompt = async (db: Database, id: number, prompt: UpdatePromp
 
   if (category_id !== undefined) {
     const newCategoryId = category_id || null
-    if (newCategoryId !== (currentPrompt.category_id ?? null)) change('category_id', newCategoryId)
+    if (newCategoryId !== (currentPrompt.category_id ?? null)) {
+      change('category_id', newCategoryId)
+      // Entering a sequence makes the prompt its last step; any other category has no step order
+      change('sort_order', await positionInCategory(db, newCategoryId), false)
+    }
   }
 
   if (template_id !== undefined) {
@@ -271,6 +325,12 @@ export const updatePrompt = async (db: Database, id: number, prompt: UpdatePromp
   if (is_favorite !== undefined) {
     const newFavorite = Boolean(is_favorite)
     if (newFavorite !== currentPrompt.is_favorite) change('is_favorite', newFavorite ? 1 : 0, false)
+  }
+
+  // Pinning is not an edit either
+  if (is_pinned !== undefined) {
+    const newPinned = Boolean(is_pinned)
+    if (newPinned !== currentPrompt.is_pinned) change('is_pinned', newPinned ? 1 : 0, false)
   }
 
   if (updates.length === 0) {
@@ -425,14 +485,37 @@ const requireCategoryName = (name: unknown): string => {
   return trimmed
 }
 
+// Validates the parent of a category (null = top level). For an existing category, the parent can be neither
+// the category itself nor one of its subcategories: that would create a cycle.
+const resolveParentId = async (db: Database, value: unknown, categoryId?: number): Promise<number | null> => {
+  if (value === null || value === undefined || value === '' || value === 0) return null
+  const parentId = Number(value)
+  if (!Number.isInteger(parentId) || parentId <= 0) throw new Error('Categoria pai inválida')
+  if (parentId === categoryId) throw new Error('Uma categoria não pode ser subcategoria dela mesma')
+  const rows = await allQuery<{ id: number; parent_id: number | null }>(db, 'SELECT id, parent_id FROM categories')
+  const parents = new Map(rows.map((row) => [row.id, row.parent_id ?? null]))
+  if (!parents.has(parentId)) throw new Error('A categoria pai escolhida não existe mais')
+  if (categoryId !== undefined) {
+    const visited = new Set<number>()
+    for (let current: number | null = parentId; current !== null && !visited.has(current); current = parents.get(current) ?? null) {
+      if (current === categoryId) {
+        throw new Error('Não é possível colocar uma categoria dentro de uma das suas subcategorias')
+      }
+      visited.add(current)
+    }
+  }
+  return parentId
+}
+
 export const createCategory = async (db: Database, category: CreateCategoryData): Promise<Category> => {
   const name = requireCategoryName(category.name)
   const { description, color } = category
   const existing = await findCategoryByName(db, name)
   if (existing) throw new Error(duplicateCategoryMessage(existing.name))
+  const parentId = await resolveParentId(db, category.parent_id)
 
-  const sql = 'INSERT INTO categories (name, description, color) VALUES (?, ?, ?)'
-  const result = await runQuery(db, sql, [name, description || null, color || '#007acc'])
+  const sql = 'INSERT INTO categories (name, description, color, parent_id, is_sequence) VALUES (?, ?, ?, ?, ?)'
+  const result = await runQuery(db, sql, [name, description || null, color || '#007acc', parentId, category.is_sequence ? 1 : 0])
     .catch((error) => rethrowCategoryError(error, name))
 
   const createdRow = await getQuery<any>(db, 'SELECT * FROM categories WHERE id = ?', [result.id])
@@ -442,24 +525,31 @@ export const createCategory = async (db: Database, category: CreateCategoryData)
 }
 
 export const updateCategory = async (db: Database, id: number, category: UpdateCategoryData): Promise<Category> => {
-  const current = await getQuery<Category>(db, 'SELECT * FROM categories WHERE id = ?', [id])
-  if (!current) throw new Error('Categoria não encontrada')
+  const currentRow = await getQuery<any>(db, 'SELECT * FROM categories WHERE id = ?', [id])
+  if (!currentRow) throw new Error('Categoria não encontrada')
+  const current = toCategory(currentRow)
 
   // Fields left undefined keep their current value
   const name = category.name !== undefined ? requireCategoryName(category.name) : current.name
   const description = category.description !== undefined ? category.description || null : current.description
   const color = category.color || current.color || '#007acc'
+  const parentId = category.parent_id !== undefined ? await resolveParentId(db, category.parent_id, id) : current.parent_id
+  const isSequence = category.is_sequence !== undefined ? Boolean(category.is_sequence) : current.is_sequence
 
   const existing = await findCategoryByName(db, name, id)
   if (existing) throw new Error(duplicateCategoryMessage(existing.name))
 
   const sql = `
     UPDATE categories
-    SET name = ?, description = ?, color = ?, updated_at = CURRENT_TIMESTAMP
+    SET name = ?, description = ?, color = ?, parent_id = ?, is_sequence = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `
-  await runQuery(db, sql, [name, description, color, id])
+  await runQuery(db, sql, [name, description, color, parentId, isSequence ? 1 : 0, id])
     .catch((error) => rethrowCategoryError(error, name))
+
+  // A category that becomes a sequence numbers its prompts in the current order (title for the unordered
+  // ones), so new prompts go to the end. Turning it off keeps the positions for later.
+  if (isSequence && !current.is_sequence) await normalizeSequenceOrder(db, id)
 
   const updatedRow = await getQuery<any>(db, 'SELECT * FROM categories WHERE id = ?', [id])
   const updated = updatedRow ? toCategory(updatedRow) : undefined
@@ -468,11 +558,15 @@ export const updateCategory = async (db: Database, id: number, category: UpdateC
 }
 
 export const deleteCategory = async (db: Database, id: number): Promise<{ success: boolean }> => {
-  // Prompts and templates both reference categories (FOREIGN KEY), so both must be detached
-  // before the delete. One transaction, so a failure never leaves prompts without their category.
+  // Prompts, templates and subcategories reference categories (FOREIGN KEY), so all of them must be
+  // detached before the delete. One transaction, so a failure never leaves prompts without their category.
   await runQuery(db, 'BEGIN IMMEDIATE')
   try {
-    await runQuery(db, 'UPDATE prompts SET category_id = NULL WHERE category_id = ?', [id])
+    const category = await getQuery<{ parent_id: number | null }>(db, 'SELECT parent_id FROM categories WHERE id = ?', [id])
+    // Subcategories move up one level (to the parent of the deleted category, or to the top level)
+    const newParentId = category?.parent_id && category.parent_id !== id ? category.parent_id : null
+    await runQuery(db, 'UPDATE categories SET parent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE parent_id = ?', [newParentId, id])
+    await runQuery(db, 'UPDATE prompts SET category_id = NULL, sort_order = NULL WHERE category_id = ?', [id])
     await runQuery(db, 'UPDATE templates SET category_id = NULL WHERE category_id = ?', [id])
     await runQuery(db, 'DELETE FROM categories WHERE id = ?', [id])
     await runQuery(db, 'COMMIT')
@@ -577,7 +671,21 @@ export const setSetting = async (db: Database, key: string, value: string): Prom
 
 // EXPORT/IMPORT
 
-const EXPORT_FORMAT_VERSION = '2.0'
+// 2.1: categories carry "parent" (name) and "is_sequence"; prompts carry is_pinned, sort_order, usage_count and
+// last_used_at. Files without these fields (2.0 and older) still import.
+const EXPORT_FORMAT_VERSION = '2.1'
+
+type ExportedCategory = ExportData['categories'][number] & { parent: string | null; is_sequence: boolean }
+type ExportedPrompt = ExportData['prompts'][number] & {
+  is_pinned: boolean
+  sort_order: number | null
+  usage_count: number
+  last_used_at: string | null
+}
+interface FullExportData extends Omit<ExportData, 'categories' | 'prompts'> {
+  readonly categories: readonly ExportedCategory[]
+  readonly prompts: readonly ExportedPrompt[]
+}
 const TXT_TITLE = 'Exportação do Prompt Studio'
 const TXT_DESCRIPTION_MARKER = '----- Descrição -----'
 const TXT_CONTENT_MARKER = '----- Conteúdo -----'
@@ -644,11 +752,18 @@ export const exportPrompts = async (db: Database, filePath: string, format: 'jso
 
   let data: string
   if (format === 'json') {
-    const exportData: ExportData = {
+    const categoryNames = new Map(categories.map((c) => [c.id, c.name]))
+    const exportData: FullExportData = {
       app: 'Prompt Studio',
       version: EXPORT_FORMAT_VERSION,
       exported_at: new Date().toISOString(),
-      categories: categories.map((c) => ({ name: c.name, description: c.description, color: c.color })),
+      categories: categories.map((c) => ({
+        name: c.name,
+        description: c.description,
+        color: c.color,
+        parent: (c.parent_id !== null && categoryNames.get(c.parent_id)) || null,
+        is_sequence: c.is_sequence,
+      })),
       templates: templates.map((t) => ({
         name: t.name,
         description: t.description,
@@ -664,6 +779,10 @@ export const exportPrompts = async (db: Database, filePath: string, format: 'jso
         template_name: p.template_name ?? null,
         tags: [...p.tags],
         is_favorite: p.is_favorite,
+        is_pinned: p.is_pinned,
+        sort_order: p.sort_order,
+        usage_count: p.usage_count,
+        last_used_at: p.last_used_at,
         created_at: p.created_at,
         updated_at: p.updated_at,
       })),
@@ -821,9 +940,22 @@ interface ValidImportPrompt {
   templateName: string | null
   tags: string[]
   isFavorite: boolean
+  isPinned: boolean
+  // Step position inside a sequence category (null = none)
+  sortOrder: number | null
+  usageCount: number
+  lastUsedAt: string | null
   // Original dates in SQLite's UTC format, when the file has valid ones
   createdAt: string | null
   updatedAt: string | null
+}
+
+const importFlag = (value: unknown): boolean => value === true || value === 1 || value === 'true'
+
+// Integer >= min from a number or numeric text; null otherwise
+const importInteger = (value: unknown, min: number): number | null => {
+  const number = typeof value === 'string' && value.trim() ? Number(value) : value
+  return typeof number === 'number' && Number.isSafeInteger(number) && number >= min ? number : null
 }
 
 // Accepts SQLite timestamps (UTC without zone, as exported by this app) and ISO dates; returns the
@@ -863,7 +995,11 @@ const validateImportItem = (item: unknown): ValidImportPrompt | string => {
     categoryName: nameField(raw.category_name, raw.category),
     templateName: nameField(raw.template_name),
     tags: importTags(raw.tags),
-    isFavorite: raw.is_favorite === true || raw.is_favorite === 1 || raw.is_favorite === 'true',
+    isFavorite: importFlag(raw.is_favorite),
+    isPinned: importFlag(raw.is_pinned),
+    sortOrder: importInteger(raw.sort_order, 1),
+    usageCount: importInteger(raw.usage_count, 0) ?? 0,
+    lastUsedAt: importDate(raw.last_used_at),
     createdAt: importDate(raw.created_at),
     updatedAt: importDate(raw.updated_at),
   }
@@ -945,9 +1081,10 @@ export const importPrompts = async (db: Database, filePath: string): Promise<Imp
   try {
     await runQuery(db, 'BEGIN IMMEDIATE')
     inTransaction = true
-    const categories = await allQuery<Category>(db, 'SELECT * FROM categories')
+    const categories = await allQuery<{ id: number; name: string; is_sequence: number }>(db, 'SELECT id, name, is_sequence FROM categories')
     const categoryIds = new Map(categories.map((c) => [c.name.trim().toLocaleLowerCase('pt-BR'), c.id]))
-    const fileCategoryInfo = new Map<string, { description: string | null; color: string }>()
+    const sequenceIds = new Set(categories.filter((c) => c.is_sequence).map((c) => c.id))
+    const fileCategoryInfo = new Map<string, { description: string | null; color: string; parent: string | null; isSequence: boolean }>()
     for (const entry of fileCategories) {
       if (!entry || typeof entry !== 'object') continue
       const raw = entry as RawImportItem
@@ -956,21 +1093,42 @@ export const importPrompts = async (db: Database, filePath: string): Promise<Imp
       fileCategoryInfo.set(name.toLocaleLowerCase('pt-BR'), {
         description: optionalText(raw.description),
         color: typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : DEFAULT_CATEGORY_COLOR,
+        parent: nameField(raw.parent, raw.parent_name),
+        isSequence: importFlag(raw.is_sequence),
       })
     }
 
-    const resolveCategory = async (name: string | null): Promise<number | null> => {
+    // Categories that already exist are kept as they are. A new one is created with its parent (created
+    // first when needed); `chain` holds the categories being created, so a cycle in the file stops there.
+    const resolveCategory = async (name: string | null, chain: ReadonlySet<string> = new Set()): Promise<number | null> => {
       if (!name) return null
       const key = name.toLocaleLowerCase('pt-BR')
       const existing = categoryIds.get(key)
       if (existing !== undefined) return existing
       const info = fileCategoryInfo.get(key)
-      const result = await runQuery(db, 'INSERT INTO categories (name, description, color) VALUES (?, ?, ?)', [
-        name, info?.description ?? null, info?.color ?? DEFAULT_CATEGORY_COLOR,
+      const parentName = info?.parent && !chain.has(info.parent.toLocaleLowerCase('pt-BR')) ? info.parent : null
+      const parentId = parentName && parentName.toLocaleLowerCase('pt-BR') !== key
+        ? await resolveCategory(parentName, new Set([...chain, key]))
+        : null
+      const result = await runQuery(db, 'INSERT INTO categories (name, description, color, parent_id, is_sequence) VALUES (?, ?, ?, ?, ?)', [
+        name, info?.description ?? null, info?.color ?? DEFAULT_CATEGORY_COLOR, parentId, info?.isSequence ? 1 : 0,
       ])
       categoryIds.set(key, result.id)
+      if (info?.isSequence) sequenceIds.add(result.id)
       categoriesCreated++
       return result.id
+    }
+
+    // Imported steps go after the steps a sequence already has, keeping their order from the file
+    const sequenceBase = new Map<number, number>()
+    const importedPosition = async (categoryId: number | null, sortOrder: number | null): Promise<number | null> => {
+      if (categoryId === null || sortOrder === null || !sequenceIds.has(categoryId)) return sortOrder
+      let base = sequenceBase.get(categoryId)
+      if (base === undefined) {
+        base = await normalizeSequenceOrder(db, categoryId)
+        sequenceBase.set(categoryId, base)
+      }
+      return base + sortOrder
     }
 
     const templates = await allQuery<{ id: number; name: string }>(db, 'SELECT id, name FROM templates')
@@ -993,6 +1151,7 @@ export const importPrompts = async (db: Database, filePath: string): Promise<Imp
 
     const existingPrompts = await allQuery<{ title: string; content: string }>(db, 'SELECT title, content FROM prompts')
     const promptKeys = new Set(existingPrompts.map((p) => `${p.title.trim()}\u0000${p.content}`))
+    const touchedSequences = new Set<number>()
 
     for (const [index, item] of items.entries()) {
       const prompt = validateImportItem(item)
@@ -1008,14 +1167,23 @@ export const importPrompts = async (db: Database, filePath: string): Promise<Imp
       }
       const categoryId = await resolveCategory(prompt.categoryName)
       const templateId = prompt.templateName ? templateIds.get(prompt.templateName.toLocaleLowerCase('pt-BR')) ?? null : null
+      const sortOrder = await importedPosition(categoryId, prompt.sortOrder)
       const result = await runQuery(db,
-        `INSERT INTO prompts (title, content, description, category_id, template_id, tags, is_favorite, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, ?, CURRENT_TIMESTAMP))`,
+        `INSERT INTO prompts (title, content, description, category_id, template_id, tags, is_favorite, is_pinned, sort_order,
+           usage_count, last_used_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, ?, CURRENT_TIMESTAMP))`,
         [prompt.title, prompt.content, prompt.description, categoryId, templateId, JSON.stringify(prompt.tags), prompt.isFavorite ? 1 : 0,
+          prompt.isPinned ? 1 : 0, sortOrder, prompt.usageCount, prompt.lastUsedAt,
           prompt.createdAt, prompt.updatedAt, prompt.createdAt])
       await runQuery(db, 'INSERT INTO prompt_versions (prompt_id, content, version_number) VALUES (?, ?, 1)', [result.id, prompt.content])
       promptKeys.add(key)
+      if (categoryId !== null && sequenceIds.has(categoryId)) touchedSequences.add(categoryId)
       imported++
+    }
+
+    // Steps without a position (older files, other categories) go after the others, by title
+    for (const categoryId of touchedSequences) {
+      await normalizeSequenceOrder(db, categoryId)
     }
 
     await runQuery(db, 'COMMIT')

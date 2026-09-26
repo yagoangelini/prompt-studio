@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { confirmAction } from '@/components/ui/confirm-dialog'
-import { usePromptStore } from '@/stores/usePromptStore'
+import { usePromptStore, getMcpPortError, isValidMcpPort } from '@/stores/usePromptStore'
 import type { McpExposedPromptRef, McpServerLogEntry, Prompt } from '@/types'
 
 // The server only listens on this address (see electron/mcp-server.ts)
@@ -36,8 +36,6 @@ const LOG_LEVEL_LABELS: Record<McpServerLogEntry['level'], string> = {
   WARN: 'Aviso',
   ERROR: 'Erro',
 }
-
-const isValidPort = (value: number) => Number.isInteger(value) && value >= 1 && value <= 65535
 
 // Exposures the server can use: exposed, with a secure hash and pointing to an existing prompt
 const getValidExposures = (
@@ -70,19 +68,28 @@ interface NumberSettingProps {
   disabled?: boolean
   hint?: string
   onCommit: (value: number) => void
+  // With these, an invalid value stays in the field as a draft kept outside it (it survives tab changes
+  // and is not reverted on blur), so actions that depend on the value can refuse to run
+  draft?: string | null
+  onDraftChange?: (draft: string | null) => void
 }
 
 // Numeric field that only saves valid integers: an empty or out-of-range value shows an error
-// instead of being stored as NaN (and is reverted when the field loses focus)
-function NumberSetting({ id, label, value, min, max, disabled, hint, onCommit }: NumberSettingProps) {
-  const [text, setText] = useState(Number.isFinite(value) ? String(value) : '')
+// instead of being stored as NaN (and is reverted when the field loses focus, unless kept as a draft)
+function NumberSetting({ id, label, value, min, max, disabled, hint, onCommit, draft, onDraftChange }: NumberSettingProps) {
+  const valueText = Number.isFinite(value) ? String(value) : ''
+  const [localText, setLocalText] = useState(valueText)
 
   useEffect(() => {
-    setText(Number.isFinite(value) ? String(value) : '')
-  }, [value])
+    setLocalText(valueText)
+  }, [valueText])
 
-  const parsed = Number(text)
-  const valid = text.trim() !== '' && Number.isInteger(parsed) && parsed >= min && parsed <= max
+  const isValidText = (candidate: string) => {
+    const parsed = Number(candidate)
+    return candidate.trim() !== '' && Number.isInteger(parsed) && parsed >= min && parsed <= max
+  }
+  const text = onDraftChange ? draft ?? valueText : localText
+  const valid = isValidText(text)
   const errorId = `${id}-erro`
 
   return (
@@ -99,12 +106,14 @@ function NumberSetting({ id, label, value, min, max, disabled, hint, onCommit }:
         aria-invalid={!valid}
         aria-describedby={!valid ? errorId : undefined}
         onChange={(e) => {
-          setText(e.target.value)
-          const next = Number(e.target.value)
-          if (e.target.value.trim() !== '' && Number.isInteger(next) && next >= min && next <= max) onCommit(next)
+          const next = e.target.value
+          const nextValid = isValidText(next)
+          if (onDraftChange) onDraftChange(nextValid ? null : next)
+          else setLocalText(next)
+          if (nextValid) onCommit(Number(next))
         }}
         onBlur={() => {
-          if (!valid) setText(Number.isFinite(value) ? String(value) : '')
+          if (!onDraftChange && !valid) setLocalText(valueText)
         }}
       />
       {!valid ? (
@@ -150,7 +159,9 @@ export function McpServerPanel() {
     addToast,
     mcpConfig,
     exposedPrompts,
+    mcpPortDraft,
     updateMcpConfig,
+    setMcpPortDraft,
     togglePromptExposure,
     migrateLegacyEndpoints
   } = usePromptStore()
@@ -172,8 +183,10 @@ export function McpServerPanel() {
   const legacyCount = exposedPrompts.filter(
     (e) => e.exposed && (!e.secureHash || /\/prompts\/\d+$/.test(e.endpoint))
   ).length
-  const displayPort = serverStatus.running ? serverStatus.port : mcpConfig.port
-  const baseUrl = `http://${MCP_HOST}:${isValidPort(displayPort) ? displayPort : 'PORTA'}`
+  const portError = getMcpPortError({ mcpConfig, mcpPortDraft })
+  // While the port field holds an invalid value, the examples show a placeholder instead of the old port
+  const displayPort = serverStatus.running ? serverStatus.port : portError ? null : mcpConfig.port
+  const baseUrl = `http://${MCP_HOST}:${isValidMcpPort(displayPort) ? displayPort : 'PORTA'}`
   const mcpUrl = `${baseUrl}/mcp`
 
   const refreshStatus = useCallback(async () => {
@@ -238,6 +251,11 @@ export function McpServerPanel() {
     syncExposuresWithServer()
   }, [legacyCount, migrateLegacyEndpoints, syncExposuresWithServer])
 
+  // A server started elsewhere (header, menu bar) uses the saved port: the locked field shows it again
+  useEffect(() => {
+    if (serverStatus.running) setMcpPortDraft(null)
+  }, [serverStatus.running, setMcpPortDraft])
+
   // Settings changed while the server runs apply immediately (the port is locked while running)
   useEffect(() => {
     if (!serverStatus.running) return
@@ -257,9 +275,11 @@ export function McpServerPanel() {
   }
 
   const handleStartServer = async () => {
-    if (!isValidPort(mcpConfig.port)) {
+    // Checked on the latest state: the port field may hold an invalid value (never start on the old port)
+    const invalidPort = getMcpPortError(usePromptStore.getState())
+    if (invalidPort) {
       setActiveTab('config')
-      addToast({ type: 'error', title: 'Porta inválida', description: 'Use um número inteiro entre 1 e 65535 na aba Configuração.' })
+      addToast({ type: 'error', title: 'Porta inválida', description: invalidPort })
       return
     }
     if (mcpConfig.enableAuth && !mcpConfig.apiKey.trim()) {
@@ -320,10 +340,11 @@ export function McpServerPanel() {
   }
 
   const handleExportConfig = () => {
-    // The API key is a secret: it never goes into the exported file
-    const { apiKey: _apiKey, host: _host, ...server } = mcpConfig
+    // Only the user's settings, listed field by field: never the API key (a secret) nor internal fields
+    // such as "host" or "allowedOrigins" that older versions kept
+    const { name, description, port, enableAuth, maxConnections, rateLimit, enableCors, enableLogging, logLevel } = mcpConfig
     const config = {
-      server: { ...server, host: MCP_HOST },
+      server: { name, description, port, enableAuth, maxConnections, rateLimit, enableCors, enableLogging, logLevel },
       exposedPrompts: validExposures,
     }
 
@@ -511,6 +532,15 @@ export function McpServerPanel() {
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
                     Você precisa expor pelo menos um prompt antes de iniciar o servidor. Acesse a aba "Prompts expostos" para escolher quais prompts disponibilizar.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {portError && !serverStatus.running && (
+                <Alert variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>
+                    A porta digitada na aba "Configuração" é inválida. Use um número inteiro entre 1 e 65535 para poder iniciar o servidor.
                   </AlertDescription>
                 </Alert>
               )}
@@ -827,6 +857,8 @@ export function McpServerPanel() {
                       ? 'Pare o servidor para alterar a porta.'
                       : `O servidor aceita conexões apenas deste computador (${MCP_HOST}).`}
                     onCommit={(port) => updateMcpConfig({ port })}
+                    draft={mcpPortDraft}
+                    onDraftChange={setMcpPortDraft}
                   />
                 </div>
 
@@ -1068,7 +1100,7 @@ export function McpServerPanel() {
                 <div>
                   <h3 className="font-semibold mb-2">O que o cliente MCP recebe</h3>
                   <ul className="list-disc list-inside space-y-1 text-sm">
-                    <li><strong>Prompts</strong>: cada prompt exposto, com as variáveis <code>{'{{...}}'}</code> do conteúdo como argumentos. No Claude Code, aparecem como <code>/mcp__prompt-studio__nome-do-prompt</code>.</li>
+                    <li><strong>Prompts</strong>: cada prompt exposto, com as variáveis <code>{'{{...}}'}</code> do conteúdo como argumentos. No Claude Code, aparecem como <code>/mcp__prompt-studio__nome-do-prompt</code>. O nome vem do título; se outro prompt tiver o mesmo título, o nome recebe também o número do prompt (por exemplo, <code>resumo_12</code>).</li>
                     <li><strong>Ferramenta <code>obter_prompt</code></strong>: recebe <code>nome</code> (ou <code>hash</code>) e <code>variaveis</code>, e devolve o texto do prompt preenchido.</li>
                   </ul>
                 </div>

@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { X, Copy, Edit, Heart, Calendar, Tag, Folder, FileText, Check, Files, Trash2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { X, Copy, Edit, Heart, Pin, Calendar, Tag, Folder, FileText, Check, Files, Trash2, Braces, BarChart3 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -9,6 +9,9 @@ import { usePromptStore } from '@/stores/usePromptStore'
 import { formatDistanceToNow } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
 import { cn, parseDbDate } from '@/lib/utils'
+import { copyPrompt } from '@/lib/copy-prompt'
+import { extractVariables, splitVariableSegments } from '../templates/template-variables'
+import { canHighlightVariables } from './variable-textarea'
 import type { Prompt } from '@/types'
 
 interface PromptViewerProps {
@@ -26,7 +29,7 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
     deletePrompt,
     duplicatePrompt,
     openPromptEditor,
-    addToast
+    setPromptPinned
   } = usePromptStore()
 
   // Get the current prompt from the store to ensure we have the latest data
@@ -37,26 +40,18 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
     await updatePrompt(prompt.id, { is_favorite: !prompt.is_favorite })
   }
 
+  const variables = useMemo(() => extractVariables(prompt.content), [prompt.content])
+  // Variables highlighted in the content (skipped for huge texts, like in the editor)
+  const contentSegments = useMemo(
+    () => (variables.length > 0 && canHighlightVariables(prompt.content) ? splitVariableSegments(prompt.content) : null),
+    [prompt.content, variables.length]
+  )
+
+  // Asks for the {{variables}} (if any), copies, counts the usage and shows the toast (or the error)
   const handleCopy = async () => {
-    try {
-      await window.electronAPI.copyToClipboard(prompt.content)
-
-      // Show visual feedback
+    if (await copyPrompt(prompt)) {
       setJustCopied(true)
-      setTimeout(() => setJustCopied(false), 2000) // Reset after 2 seconds
-
-      addToast({
-        type: 'success',
-        title: 'Copiado para a área de transferência',
-        description: 'Conteúdo do prompt copiado com sucesso'
-      })
-    } catch (error) {
-      console.error('Failed to copy:', error)
-      addToast({
-        type: 'error',
-        title: 'Não foi possível copiar',
-        description: `Não foi possível copiar o conteúdo do prompt: ${error instanceof Error ? error.message : 'erro desconhecido'}`
-      })
+      setTimeout(() => setJustCopied(false), 2000)
     }
   }
 
@@ -128,6 +123,18 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
                 <h1 className="min-w-0 text-xl font-bold leading-tight break-words [overflow-wrap:anywhere]">
                   {prompt.title}
                 </h1>
+                <div className="flex flex-shrink-0 items-center">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setPromptPinned(prompt.id, !prompt.is_pinned)}
+                  className="h-8 w-8 flex-shrink-0"
+                  aria-label={prompt.is_pinned ? 'Desafixar' : 'Fixar no topo'}
+                  aria-pressed={prompt.is_pinned}
+                  title={prompt.is_pinned ? 'Desafixar' : 'Fixar no topo'}
+                >
+                  <Pin className={cn("h-4 w-4", prompt.is_pinned && "fill-current")} />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -142,6 +149,7 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
                     prompt.is_favorite && "fill-current text-red-500"
                   )} />
                 </Button>
+                </div>
               </div>
 
               {/* Action Buttons */}
@@ -220,6 +228,16 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
                   <span className="text-muted-foreground">Criado:</span>
                   <span className="font-medium">{formatDate(prompt.created_at)}</span>
                 </div>
+
+                {(prompt.usage_count ?? 0) > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <BarChart3 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                    <span className="text-muted-foreground">
+                      Usado {prompt.usage_count.toLocaleString('pt-BR')} {prompt.usage_count === 1 ? 'vez' : 'vezes'}
+                      {prompt.last_used_at ? `, a última ${formatDate(prompt.last_used_at)}` : ''}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Tags */}
@@ -264,9 +282,26 @@ export function PromptViewer({ prompt: initialPrompt, onClose }: PromptViewerPro
                 <FileText className="h-4 w-4 text-muted-foreground" />
                 <h3 className="text-sm font-medium text-muted-foreground">Conteúdo do prompt</h3>
               </div>
+              {variables.length > 0 && (
+                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Braces className="h-3.5 w-3.5 mt-px flex-shrink-0" aria-hidden="true" />
+                  <span>
+                    {variables.length === 1 ? 'Este prompt tem 1 variável' : `Este prompt tem ${variables.length} variáveis`}
+                    {': ao copiar, você preenche os valores.'}
+                  </span>
+                </p>
+              )}
               <div className="bg-muted/30 rounded-lg p-3 min-w-0">
                 <pre className="text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono leading-relaxed">
-                  {prompt.content}
+                  {contentSegments
+                    ? contentSegments.map((segment, index) =>
+                        segment.kind === 'variable' ? (
+                          <span key={index} className="rounded-sm bg-primary/15 text-foreground">{segment.text}</span>
+                        ) : (
+                          segment.text
+                        )
+                      )
+                    : prompt.content}
                 </pre>
               </div>
             </div>

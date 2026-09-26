@@ -149,6 +149,7 @@ const createTables = (): Promise<void> => {
         response_time_ms INTEGER,
         input_tokens INTEGER,
         output_tokens INTEGER,
+        source TEXT NOT NULL DEFAULT 'test',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE SET NULL
       )`
@@ -191,6 +192,8 @@ const COLUMN_MIGRATIONS: ReadonlyArray<{ table: string; column: string; definiti
   { table: 'prompts', column: 'sort_order', definition: 'INTEGER' },
   { table: 'categories', column: 'is_sequence', definition: 'INTEGER NOT NULL DEFAULT 0' },
   { table: 'categories', column: 'parent_id', definition: 'INTEGER REFERENCES categories (id)' },
+  // "test" or "compare" (tab where the run was executed)
+  { table: 'test_runs', column: 'source', definition: "TEXT NOT NULL DEFAULT 'test'" },
 ]
 
 const addMissingColumns = async (): Promise<void> => {
@@ -399,7 +402,9 @@ export const factoryReset = async (): Promise<void> => {
     'DELETE FROM prompts',
     'DELETE FROM templates',
     'DELETE FROM categories',
-    "DELETE FROM settings WHERE key != 'first_time_setup_complete'" // Keep the first time setup flag
+    // Keeps the first time setup flag, and the automatic backup and quick paste settings: resetting the
+    // data must not silently turn off backups or take away the global shortcut
+    "DELETE FROM settings WHERE key NOT IN ('first_time_setup_complete', 'backup', 'quickPaste')"
   ]
 
   await run('BEGIN TRANSACTION')

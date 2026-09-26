@@ -2,11 +2,12 @@ import React from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Keyboard } from 'lucide-react'
-import { KEYBOARD_SHORTCUTS, ShortcutsTypingNote } from '@/components/keyboard-shortcuts-help'
+import { ShortcutsTypingNote, useShortcutList } from '@/components/keyboard-shortcuts-help'
 import { isMacPlatform } from '@/hooks/use-keyboard-shortcuts'
 
 export function KeyboardShortcutsSettings() {
   const isMac = isMacPlatform()
+  const shortcuts = useShortcutList()
 
   return (
     <div className="flex-1 overflow-auto">
@@ -22,7 +23,7 @@ export function KeyboardShortcutsSettings() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {KEYBOARD_SHORTCUTS.map((shortcut, index) => {
+            {shortcuts.map((shortcut, index) => {
               const keys = isMac ? shortcut.key : shortcut.pcKey
 
               return (
@@ -54,25 +55,11 @@ export function KeyboardShortcutsSettings() {
                 <p><strong>Dicas:</strong></p>
                 <ul className="list-disc list-inside space-y-1 ml-2">
                   <li><ShortcutsTypingNote /></li>
+                  <li>O atalho global do colar rápido pode ser trocado ou desligado no cartão Colar rápido, acima; os outros atalhos são fixos</li>
                   <li>{isMac ? '⌘' : 'Ctrl'}+S só salva quando o editor de prompt está aberto e os campos obrigatórios (título e conteúdo) estão preenchidos</li>
                   <li>A alternância de temas percorre os 12 temas: Sistema → Claro → Escuro → Preto fosco → Meia-noite → Oceano → Floresta → Roxo cósmico → Pôr do sol → Ártico → Rosa → macOS</li>
                 </ul>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Future shortcuts configuration */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Atalhos personalizados</CardTitle>
-            <CardDescription>
-              Personalize os atalhos de teclado de acordo com o seu fluxo de trabalho.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm text-muted-foreground py-8 text-center border-2 border-dashed rounded-lg">
-              Em breve você poderá configurar atalhos personalizados.
             </div>
           </CardContent>
         </Card>

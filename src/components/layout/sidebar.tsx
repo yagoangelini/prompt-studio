@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Folder, Plus, Tag, Heart, Clock, Settings, MoreVertical, Edit, Trash2, Info, Keyboard } from 'lucide-react'
+import { ChevronDown, ChevronRight, Folder, FolderPlus, ListOrdered, Plus, Tag, Heart, Clock, Settings, MoreVertical, Edit, Trash2, Info, Keyboard } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -14,6 +14,7 @@ import { ThemeSwitcher } from '../ui/theme-switcher'
 import { KeyboardShortcutsHelp } from '../keyboard-shortcuts-help'
 import { confirmCategoryDeletion } from '../settings/category-manager'
 import { parseSearchQuery, normalizeSearchText } from '@/lib/search-parser'
+import { buildCategoryTree, countPromptsByCategory, flattenCategoryTree } from '../organization/organization-utils'
 import type { Category } from '@/types'
 
 interface SidebarProps {
@@ -28,6 +29,8 @@ const countBadgeClass =
 export function Sidebar({ collapsed = false }: SidebarProps) {
   const [categoryModalOpen, setCategoryModalOpen] = useState(false)
   const [editingCategory, setEditingCategory] = useState<Category | undefined>(undefined)
+  // Parent of the category being created ("Nova subcategoria")
+  const [newCategoryParentId, setNewCategoryParentId] = useState<number | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [sectionsOpen, setSectionsOpen] = useState({
     categories: true,
@@ -45,28 +48,38 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
     toggleFavoriteFilter,
     deleteCategory,
     openSettings,
+    isSettingsOpen,
     openPromptEditor,
     getRecentlyInteractedPrompts,
-    openPromptViewer
+    openPromptViewer,
+    collapsedCategoryIds,
+    toggleCategoryCollapsed
   } = usePromptStore()
 
   const recentPrompts = getRecentlyInteractedPrompts().slice(0, 5)
   const favoriteCount = prompts.filter(p => p.is_favorite).length
 
-  // Prompt counts per category and per tag (tags match like the "tag:" filter: ignoring case and accents)
-  const { categoryCounts, tagCounts } = useMemo(() => {
-    const categoryCounts = new Map<number, number>()
-    const tagCounts = new Map<string, number>()
+  // Prompt counts per category (including its subcategories, like the filter) and per tag (tags match like
+  // the "tag:" filter: ignoring case and accents)
+  const categoryCounts = useMemo(() => countPromptsByCategory(categories, prompts), [categories, prompts])
+  const tagCounts = useMemo(() => {
+    const counts = new Map<string, number>()
     for (const prompt of prompts) {
-      if (prompt.category_id !== null) {
-        categoryCounts.set(prompt.category_id, (categoryCounts.get(prompt.category_id) ?? 0) + 1)
-      }
       for (const tag of new Set(prompt.tags.map(normalizeSearchText))) {
-        tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1)
+        counts.set(tag, (counts.get(tag) ?? 0) + 1)
       }
     }
-    return { categoryCounts, tagCounts }
+    return counts
   }, [prompts])
+
+  // Categories as a tree: the sidebar hides the subcategories of collapsed ones; the compact menu shows all
+  const categoryTree = useMemo(() => buildCategoryTree(categories), [categories])
+  const collapsedCategories = useMemo(() => new Set(collapsedCategoryIds), [collapsedCategoryIds])
+  const categoryRows = useMemo(
+    () => flattenCategoryTree(categoryTree, collapsedCategories),
+    [categoryTree, collapsedCategories]
+  )
+  const allCategoryRows = useMemo(() => flattenCategoryTree(categoryTree), [categoryTree])
 
   const getCategoryPromptCount = (categoryId: number) => categoryCounts.get(categoryId) ?? 0
   const getTagPromptCount = (tag: string) => tagCounts.get(normalizeSearchText(tag)) ?? 0
@@ -99,13 +112,15 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
     setSectionsOpen(prev => ({ ...prev, [section]: !prev[section] }))
   }
 
-  const handleCreateCategory = () => {
+  const handleCreateCategory = (parentId: number | null = null) => {
     setEditingCategory(undefined)
+    setNewCategoryParentId(parentId)
     setCategoryModalOpen(true)
   }
 
   const handleEditCategory = (category: Category) => {
     setEditingCategory(category)
+    setNewCategoryParentId(null)
     setCategoryModalOpen(true)
   }
 
@@ -120,6 +135,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
     setCategoryModalOpen(open)
     if (!open) {
       setEditingCategory(undefined)
+      setNewCategoryParentId(null)
     }
   }
 
@@ -204,22 +220,26 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                 <span className={countBadgeClass}>{prompts.length}</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              {categories.map((category) => (
+              {allCategoryRows.map(({ category, depth }) => (
                 <DropdownMenuItem
                   key={category.id}
                   onClick={() => setCategoryFilter(category.id)}
                   className={cn("gap-2", isCategoryActive(category) && "bg-secondary")}
+                  style={depth > 0 ? { paddingLeft: `${0.5 + depth * 0.75}rem` } : undefined}
                 >
                   <div
                     className="h-2 w-2 rounded-full shrink-0"
                     style={{ backgroundColor: category.color }}
                   />
                   <span className="flex-1 min-w-0 truncate" title={category.name}>{category.name}</span>
+                  {category.is_sequence && (
+                    <ListOrdered className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Sequência" />
+                  )}
                   <span className={countBadgeClass}>{getCategoryPromptCount(category.id)}</span>
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleCreateCategory}>
+              <DropdownMenuItem onClick={() => handleCreateCategory()}>
                 <Plus className="h-4 w-4 mr-2" />
                 Nova categoria
               </DropdownMenuItem>
@@ -358,6 +378,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
           open={categoryModalOpen}
           onOpenChange={handleCategoryModalClose}
           category={editingCategory}
+          defaultParentId={newCategoryParentId}
         />
 
         {/* Keyboard Shortcuts Help */}
@@ -444,28 +465,52 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 flex-shrink-0"
-                onClick={handleCreateCategory}
+                onClick={() => handleCreateCategory()}
                 aria-label="Nova categoria"
                 title="Nova categoria"
               >
                 <Plus className="h-3 w-3" />
               </Button>
             </div>
-            <CollapsibleContent className="space-y-1 ml-6 min-w-0">
-              <Button
-                variant={!activeCategory ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setCategoryFilter(null)}
-                className="w-full min-w-0 justify-start h-7 text-xs px-2"
-              >
-                <span className="flex-1 min-w-0 truncate text-left">Todas as categorias</span>
-                <span className={cn(countBadgeClass, "ml-2")}>
-                  {prompts.length}
-                </span>
-              </Button>
-              {categories.map((category) => (
-                // The ⋮ button overlays the count (shown on hover/focus) instead of taking width from the name
-                <div key={category.id} className="group relative flex items-center min-w-0">
+            <CollapsibleContent className="space-y-1 ml-1 min-w-0">
+              <div className="pl-5 min-w-0">
+                <Button
+                  variant={!activeCategory ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setCategoryFilter(null)}
+                  className="w-full min-w-0 justify-start h-7 text-xs px-2"
+                >
+                  <span className="flex-1 min-w-0 truncate text-left">Todas as categorias</span>
+                  <span className={cn(countBadgeClass, "ml-2")}>
+                    {prompts.length}
+                  </span>
+                </Button>
+              </div>
+              {categoryRows.map(({ category, depth, hasChildren }) => (
+                // The ⋮ button overlays the count (shown on hover/focus) instead of taking width from the name.
+                // Subcategories are indented under their parent, which can collapse them.
+                <div
+                  key={category.id}
+                  className="group relative flex items-center min-w-0"
+                  style={depth > 0 ? { paddingLeft: `${depth * 0.75}rem` } : undefined}
+                >
+                  {hasChildren ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0"
+                      onClick={() => toggleCategoryCollapsed(category.id)}
+                      aria-expanded={!collapsedCategories.has(category.id)}
+                      aria-label={`${collapsedCategories.has(category.id) ? 'Expandir' : 'Recolher'} subcategorias de ${category.name}`}
+                      title={collapsedCategories.has(category.id) ? 'Expandir subcategorias' : 'Recolher subcategorias'}
+                    >
+                      {collapsedCategories.has(category.id)
+                        ? <ChevronRight className="h-3 w-3" />
+                        : <ChevronDown className="h-3 w-3" />}
+                    </Button>
+                  ) : (
+                    <span className="w-5 shrink-0" aria-hidden="true" />
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -479,6 +524,9 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                           style={{ backgroundColor: category.color }}
                         />
                         <span className="flex-1 min-w-0 truncate text-left">{category.name}</span>
+                        {category.is_sequence && (
+                          <ListOrdered className="h-3 w-3 ml-1 shrink-0 text-muted-foreground" aria-label="Sequência" />
+                        )}
                         <span
                           className={cn(
                             countBadgeClass,
@@ -493,6 +541,12 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                       <p className="max-w-xs break-words">{category.name}</p>
                       {category.description && (
                         <p className="max-w-xs break-words text-muted-foreground">{category.description}</p>
+                      )}
+                      {category.is_sequence && (
+                        <p className="max-w-xs text-muted-foreground">Sequência: os prompts aparecem como passos em ordem</p>
+                      )}
+                      {hasChildren && (
+                        <p className="max-w-xs text-muted-foreground">O total inclui os prompts das subcategorias</p>
                       )}
                     </TooltipContent>
                   </Tooltip>
@@ -520,6 +574,10 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
                       <DropdownMenuItem onClick={() => handleEditCategory(category)}>
                         <Edit className="h-3 w-3 mr-2" />
                         Editar
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => handleCreateCategory(category.id)}>
+                        <FolderPlus className="h-3 w-3 mr-2" />
+                        Nova subcategoria
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         onClick={() => handleDeleteCategory(category)}
@@ -659,10 +717,11 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         </Button>
 
         <Button
-          variant="ghost"
+          variant={isSettingsOpen ? 'secondary' : 'ghost'}
           size="sm"
           className="w-full justify-start h-8 text-xs"
           onClick={() => openSettings()}
+          aria-current={isSettingsOpen ? 'page' : undefined}
         >
           <Settings className="h-4 w-4 mr-2" />
           Configurações
@@ -674,6 +733,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         open={categoryModalOpen}
         onOpenChange={handleCategoryModalClose}
         category={editingCategory}
+        defaultParentId={newCategoryParentId}
       />
 
       {/* Keyboard Shortcuts Help */}

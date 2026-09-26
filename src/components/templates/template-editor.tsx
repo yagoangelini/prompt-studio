@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { X, Save, Plus, Sparkles, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge, badgeVariants } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,9 +12,10 @@ import { confirmAction } from '@/components/ui/confirm-dialog'
 import { usePromptStore } from '@/stores/usePromptStore'
 import { cn } from '@/lib/utils'
 import { useEditorDirtySync } from '../prompts/use-editor-dirty-sync'
+import { ContentEditorField } from '../prompts/content-editor-field'
 import {
   extractVariables,
-  insertText,
+  insertVariableToken,
   parseVariableName,
   variableToken,
   type TextSelection
@@ -209,9 +209,9 @@ export function TemplateEditor({ compact = false, onClose }: TemplateEditorProps
   }
 
   // Inserts {{name}} at the last cursor position of the content (or at the end), even when the
-  // Content tab is not mounted
+  // Content tab is not mounted; a space keeps it apart from an adjacent variable or word
   const insertVariable = (name: string) => {
-    const { content, caret } = insertText(formRef.current.content, variableToken(name), selectionRef.current)
+    const { content, caret } = insertVariableToken(formRef.current.content, name, selectionRef.current)
     selectionRef.current = { start: caret, end: caret }
     updateForm({ content })
     const textarea = textareaRef.current
@@ -332,28 +332,23 @@ export function TemplateEditor({ compact = false, onClose }: TemplateEditorProps
               </div>
 
               {/* Content */}
-              <div className="space-y-2">
-                <Label htmlFor="template-content">
-                  Conteúdo <span className="text-destructive" aria-hidden="true">*</span>
-                </Label>
-                <Textarea
-                  ref={textareaRef}
-                  id="template-content"
-                  placeholder="Digite o conteúdo do template... Use {{nomeDaVariavel}} para variáveis."
-                  value={formData.content}
-                  aria-required="true"
-                  onChange={(e) => {
-                    updateForm({ content: e.target.value })
-                    rememberSelection(e.currentTarget)
-                  }}
-                  onSelect={(e) => rememberSelection(e.currentTarget)}
-                  onBlur={(e) => rememberSelection(e.currentTarget)}
-                  className="min-h-[300px] resize-y font-mono"
-                />
-                <div className="text-xs text-muted-foreground break-words">
-                  {formData.content.length} {formData.content.length === 1 ? 'caractere' : 'caracteres'} • Use a sintaxe {`{{nomeDaVariavel}}`} para variáveis
-                </div>
-              </div>
+              <ContentEditorField
+                key={templateId ?? 'new'}
+                id="template-content"
+                label={<>Conteúdo <span className="text-destructive" aria-hidden="true">*</span></>}
+                placeholder="Digite o conteúdo do template... Use {{nomeDaVariavel}} para variáveis."
+                value={formData.content}
+                required
+                monospace
+                textareaRef={textareaRef}
+                onChange={(content, element) => {
+                  updateForm({ content })
+                  rememberSelection(element)
+                }}
+                onSelect={(e) => rememberSelection(e.currentTarget)}
+                onBlur={(e) => rememberSelection(e.currentTarget)}
+                hint={<>Use a sintaxe {`{{nomeDaVariavel}}`} para variáveis</>}
+              />
             </TabsContent>
 
             <TabsContent value="variables" className="space-y-4">
@@ -436,7 +431,7 @@ export function TemplateEditor({ compact = false, onClose }: TemplateEditorProps
                   <p>
                     Use a sintaxe <code className="bg-muted px-1 rounded">{`{{nomeDaVariavel}}`}</code> no conteúdo. O nome aceita letras (inclusive acentuadas), números e _.
                   </p>
-                  <p>Ao usar o template em um prompt, preencha os valores na seção "Preencher variáveis" do editor de prompt.</p>
+                  <p>Ao usar o template em um prompt, preencha os valores na seção "Preencher variáveis" do editor de prompt, ou deixe as variáveis no prompt: ao copiá-lo, o Prompt Studio pede os valores a cada uso.</p>
                 </CardContent>
               </Card>
             </TabsContent>

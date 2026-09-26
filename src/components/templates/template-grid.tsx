@@ -15,7 +15,12 @@ export function TemplateGrid({ templates }: TemplateGridProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {templates.map((template) => (
-        <Card key={template.id} className="group flex flex-col min-w-0 transition-all hover:shadow-md">
+        // Clicking the card body opens the editor, as in the list view (the buttons stop the click)
+        <Card
+          key={template.id}
+          className="group flex flex-col min-w-0 cursor-pointer transition-all hover:shadow-md hover:border-accent"
+          onClick={() => editTemplate(template)}
+        >
           <CardHeader className="pb-3">
             <div className="flex items-start gap-2 min-w-0">
               <Sparkles className="h-4 w-4 mt-0.5 text-muted-foreground flex-shrink-0" />
@@ -60,8 +65,11 @@ export function TemplateGrid({ templates }: TemplateGridProps) {
               )}
             </div>
 
-            <div className="mt-3 p-2 bg-muted rounded text-xs font-mono line-clamp-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-              {template.content}
+            {/* Padding outside the clamped element: inside it, the bottom padding would show part of a 5th line */}
+            <div className="mt-3 p-2 bg-muted rounded">
+              <div className="text-xs font-mono line-clamp-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                {template.content}
+              </div>
             </div>
 
             {/* Actions stay visible, so they are reachable by keyboard and never cover the title */}
@@ -70,7 +78,10 @@ export function TemplateGrid({ templates }: TemplateGridProps) {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => startPromptFromTemplate(template)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void startPromptFromTemplate(template)
+                  }}
                   className="h-8"
                   title="Criar um prompt a partir deste template"
                 >
@@ -81,7 +92,10 @@ export function TemplateGrid({ templates }: TemplateGridProps) {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => editTemplate(template)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void editTemplate(template)
+                    }}
                     className="h-8 w-8 p-0"
                     aria-label={`Editar o template ${template.name}`}
                     title="Editar template"
@@ -91,7 +105,10 @@ export function TemplateGrid({ templates }: TemplateGridProps) {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => removeTemplate(template)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void removeTemplate(template)
+                    }}
                     className="h-8 w-8 p-0 text-destructive hover:text-destructive"
                     aria-label={`Excluir o template ${template.name}`}
                     title="Excluir template"

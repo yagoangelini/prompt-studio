@@ -1,4 +1,4 @@
-import { Search, Filter, SortAsc, SortDesc, Grid, List, Plus, X } from 'lucide-react'
+import { Search, Filter, SortAsc, SortDesc, Grid, List, Plus, X, CheckSquare, ListOrdered } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -11,7 +11,9 @@ import { PromptGrid } from '../prompts/prompt-grid'
 import { TestingPanel } from '../testing/testing-panel'
 import { McpServerPanel } from '../mcp/mcp-server-panel'
 import { TemplateList } from '../templates/template-list-simple'
-import { usePromptStore, type MainTab } from '@/stores/usePromptStore'
+import { BulkActionsBar } from '../organization/bulk-actions-bar'
+import { PROMPT_LIST_AREA_ATTRIBUTE, useSelectionShortcuts } from '../organization/use-selection-shortcuts'
+import { getSequenceCategoryForQuery, usePromptStore, type MainTab } from '@/stores/usePromptStore'
 import type { SortOptions } from '@/types'
 
 const SORT_OPTIONS: readonly { value: `${SortOptions['field']}:${SortOptions['direction']}`; label: string; descending: boolean }[] = [
@@ -21,7 +23,12 @@ const SORT_OPTIONS: readonly { value: `${SortOptions['field']}:${SortOptions['di
   { value: 'title:desc', label: 'Título (Z–A)', descending: true },
   { value: 'created_at:desc', label: 'Criados recentemente', descending: true },
   { value: 'created_at:asc', label: 'Criados há mais tempo', descending: false },
+  { value: 'usage_count:desc', label: 'Mais usados', descending: true },
+  { value: 'last_used_at:desc', label: 'Usados recentemente', descending: true },
 ]
+
+const SEQUENCE_SORT_HINT =
+  'Os passos desta sequência aparecem na ordem definida por você. Arraste os prompts ou use Alt+↑ e Alt+↓ para mudar a ordem; a ordenação volta a valer fora da sequência.'
 
 const MAIN_TABS: readonly MainTab[] = ['prompts', 'templates', 'testing', 'mcp']
 
@@ -45,12 +52,21 @@ export function MainContent() {
     isPromptEditorOpen,
     isPromptViewerOpen,
     activeMainTab: activeTab,
-    setActiveMainTab
+    setActiveMainTab,
+    categories,
+    isSelectionMode,
+    setSelectionMode
   } = usePromptStore()
 
   const filteredTemplates = getFilteredTemplates()
 
   const filteredPrompts = getFilteredPrompts()
+
+  // A sequence category is listed in step order: the sort option does not apply while it is shown
+  const sequenceCategory = getSequenceCategoryForQuery(searchFilters.query, categories)
+
+  // Ctrl/Cmd+A selects the filtered prompts, Esc leaves the selection mode
+  useSelectionShortcuts(filteredPrompts, activeTab === 'prompts')
 
   const handleSearch = (query: string) => {
     setSearchFilters({ query })
@@ -99,6 +115,9 @@ export function MainContent() {
                       <p><strong>Tags:</strong> adicione várias tags aos prompts para organizá-los e filtrá-los com flexibilidade.</p>
                       <p><strong>Busca avançada:</strong> use 'tag:IA,Escrita', 'categoria:Nome', 'titulo:texto', 'conteudo:texto' ou 'favorito:sim'. A busca ignora maiúsculas e acentos; com várias palavras, mostra os prompts que contêm todas.</p>
                       <p><strong>Favoritos:</strong> marque os prompts importantes como favoritos para acessá-los rapidamente.</p>
+                      <p><strong>Fixados e mais usados:</strong> fixe prompts no topo de qualquer lista e ordene por "Mais usados" ou "Usados recentemente".</p>
+                      <p><strong>Sequências:</strong> numa categoria marcada como sequência, os prompts viram passos numerados; arraste para reordenar e use "Copiar próximo passo".</p>
+                      <p><strong>Seleção:</strong> use "Selecionar" (ou Ctrl+A) para mover, marcar, exportar ou excluir vários prompts de uma vez.</p>
                       <p><strong>Templates:</strong> aplique templates prontos para agilizar a criação de prompts.</p>
                     </div>
                   }
@@ -124,10 +143,12 @@ export function MainContent() {
                   title="Testes"
                   description={
                     <div className="space-y-2">
-                      <p>Envie um prompt para um modelo de IA por meio de uma API compatível com a da OpenAI e veja a resposta.</p>
-                      <p><strong>Configuração:</strong> informe o endpoint, a chave de API e o modelo.</p>
+                      <p>Envie um prompt para um modelo de IA (OpenAI e APIs compatíveis ou Anthropic Claude) e veja a resposta.</p>
+                      <p><strong>Configuração:</strong> escolha o provedor e informe o endpoint, a chave de API e o modelo.</p>
                       <p><strong>Parâmetros:</strong> ajuste a temperatura e o máximo de tokens.</p>
                       <p><strong>Resultado:</strong> veja a resposta, o tempo de resposta e o uso de tokens.</p>
+                      <p><strong>Histórico:</strong> cada teste fica salvo; reexecute ou compare duas execuções lado a lado.</p>
+                      <p><strong>Comparar modelos:</strong> envie o mesmo prompt para duas configurações ao mesmo tempo.</p>
                     </div>
                   }
                 />
@@ -202,12 +223,18 @@ export function MainContent() {
 
                 {/* Sort and Filter Controls */}
                 <div className="flex items-center gap-3 flex-shrink-0">
-                  {/* Sort */}
+                  {/* Sort (disabled while a sequence is shown: its steps have their own order) */}
                   <Select
                     value={`${sortOptions.field}:${sortOptions.direction}`}
                     onValueChange={handleSortChange}
+                    disabled={sequenceCategory !== null}
                   >
-                    <SelectTrigger className="w-60 h-10" aria-label="Ordenar por">
+                    <SelectTrigger
+                      className="w-60 h-10"
+                      aria-label="Ordenar por"
+                      aria-describedby={sequenceCategory ? 'sequence-sort-hint' : undefined}
+                      title={sequenceCategory ? SEQUENCE_SORT_HINT : undefined}
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -240,6 +267,17 @@ export function MainContent() {
                   )}
                 </div>
               </div>
+
+              {sequenceCategory && (
+                <p id="sequence-sort-hint" className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <ListOrdered className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>
+                    Ordem da sequência “{sequenceCategory.name}”: o seletor de ordenação fica desativado enquanto ela é exibida.
+                  </span>
+                </p>
+              )}
+
+              {isSelectionMode && <BulkActionsBar visiblePrompts={filteredPrompts} />}
             </div>
           )}
 
@@ -286,7 +324,7 @@ export function MainContent() {
         {/* Content */}
         <div className="flex-1 min-h-0">
           <TabsContent value="prompts" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
-            <div className="flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-hidden" {...{ [PROMPT_LIST_AREA_ATTRIBUTE]: '' }}>
               <ScrollArea className="h-full">
                 <div className="p-4">
                   {filteredPrompts.length === 0 ? (
@@ -317,11 +355,23 @@ export function MainContent() {
                     </div>
                   ) : (
                     <>
-                      <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center justify-between gap-2 mb-4">
                         <p className="text-sm text-muted-foreground">
                           {filteredPrompts.length} prompt{filteredPrompts.length !== 1 ? 's' : ''}
                           {hasActiveFilters && (filteredPrompts.length !== 1 ? ' (filtrados)' : ' (filtrado)')}
                         </p>
+                        {!isSelectionMode && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8"
+                            onClick={() => setSelectionMode(true)}
+                            title="Selecionar vários prompts para mover, marcar, exportar ou excluir (Ctrl+A seleciona todos)"
+                          >
+                            <CheckSquare className="h-4 w-4 mr-2" />
+                            Selecionar
+                          </Button>
+                        )}
                       </div>
 
                       {promptViewMode === 'list' ? (

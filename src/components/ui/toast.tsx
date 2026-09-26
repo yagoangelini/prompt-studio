@@ -15,7 +15,8 @@ const ToastViewport = React.forwardRef<
     className={cn(
       // pointer-events-none: the empty area of the viewport must not block clicks on the app (toasts re-enable them).
       // Always at the bottom: in the 400 px menu bar popup the top holds the controls, the bottom only the list
-      "pointer-events-none fixed bottom-0 right-0 z-[100] flex max-h-screen w-full flex-col gap-2 p-4 md:max-w-[420px]",
+      // toast-viewport: moved to the top while a dialog is open (src/index.css)
+      "toast-viewport pointer-events-none fixed bottom-0 right-0 z-[100] flex max-h-screen w-full flex-col gap-2 p-4 md:max-w-[420px]",
       className
     )}
     {...props}
@@ -32,7 +33,7 @@ const toastVariants = cva(
         destructive:
           "destructive group border-destructive bg-destructive text-destructive-foreground",
         warning:
-          "border border-l-4 border-l-amber-500 bg-background text-foreground",
+          "border border-l-4 border-l-amber-600 bg-background text-foreground",
       },
     },
     defaultVariants: {

@@ -84,3 +84,63 @@ export function insertText(
 export function variableToken(name: string): string {
   return `{{${name}}}`
 }
+
+// Inserts {{name}} at the selection like insertText, but keeps it apart from an adjacent variable or
+// word ("{{a}}{{b}}" or "Resuma{{texto}}" become "{{a}} {{b}}" and "Resuma {{texto}}"). Punctuation
+// such as "_", "/", "(" or "." is left as is, so "arquivo_{{n}}" can still be written.
+export function insertVariableToken(
+  content: string,
+  name: string,
+  selection: TextSelection | null
+): { content: string; caret: number } {
+  const token = variableToken(name)
+  if (!selection) return insertText(content, token, null)
+  const start = Math.max(0, Math.min(selection.start, content.length))
+  const end = Math.max(start, Math.min(selection.end, content.length))
+  const before = content.slice(0, start)
+  const after = content.slice(end)
+  const lead = /(\}\}|[\p{L}\p{N}])$/u.test(before) ? ' ' : ''
+  const trail = /^(\{\{|[\p{L}\p{N}])/u.test(after) ? ' ' : ''
+  return {
+    content: before + lead + token + trail + after,
+    caret: start + lead.length + token.length
+  }
+}
+
+// Valid variables first (same rule as VARIABLE_PATTERN), then anything else written as {{...}} on a
+// single line, which looks like a variable but is not one ({{nome-hifen}}, {{a.b}}, {{}})
+const TOKEN_PATTERN = /\{\{\s*([\p{L}\p{N}_]+)\s*\}\}|\{\{([^{}\n]*)\}\}/gu
+
+export type VariableSegment =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'variable'; readonly text: string; readonly name: string }
+  | { readonly kind: 'invalid'; readonly text: string }
+
+// Splits a text into plain text, {{variables}} and invalid {{...}} tokens; joining the texts gives
+// back the original
+export function splitVariableSegments(content: string): VariableSegment[] {
+  const segments: VariableSegment[] = []
+  let last = 0
+  for (const match of content.matchAll(TOKEN_PATTERN)) {
+    const index = match.index ?? 0
+    if (index > last) segments.push({ kind: 'text', text: content.slice(last, index) })
+    const name = match[1]
+    segments.push(name !== undefined ? { kind: 'variable', text: match[0], name } : { kind: 'invalid', text: match[0] })
+    last = index + match[0].length
+  }
+  if (last < content.length) segments.push({ kind: 'text', text: content.slice(last) })
+  return segments
+}
+
+// Unique {{...}} tokens that are not valid variables, in order of appearance
+export function findInvalidVariableTokens(content: string): string[] {
+  if (!content.includes('{{')) return []
+  const tokens: string[] = []
+  const seen = new Set<string>()
+  for (const match of content.matchAll(TOKEN_PATTERN)) {
+    if (match[1] !== undefined || seen.has(match[0])) continue
+    seen.add(match[0])
+    tokens.push(match[0])
+  }
+  return tokens
+}

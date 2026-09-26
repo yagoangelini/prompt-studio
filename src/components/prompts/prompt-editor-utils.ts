@@ -100,6 +100,25 @@ export function tagsWithPending(tags: readonly string[], pending: string): strin
   return result.status === 'added' ? result.tags : [...tags]
 }
 
+// Rough token count shown next to the character count. Heuristic: about 4 characters per token, the
+// usual average of GPT/Claude tokenizers for English text and code (Portuguese tends to need a few
+// more tokens). It is only an estimate: the exact count depends on the model's tokenizer.
+export const CHARS_PER_TOKEN = 4
+
+export function estimateTokens(text: string): number {
+  return text.length === 0 ? 0 : Math.ceil(text.length / CHARS_PER_TOKEN)
+}
+
+// "1 caractere • ≈ 1 token (estimativa)", with pt-BR thousands separators
+export function formatTextStats(text: string): { characters: string; tokens: string } {
+  const length = text.length
+  const tokens = estimateTokens(text)
+  return {
+    characters: `${length.toLocaleString('pt-BR')} ${length === 1 ? 'caractere' : 'caracteres'}`,
+    tokens: `≈ ${tokens.toLocaleString('pt-BR')} ${tokens === 1 ? 'token' : 'tokens'} (estimativa)`
+  }
+}
+
 export interface TitleCheck {
   readonly title: string
   readonly error: string | null

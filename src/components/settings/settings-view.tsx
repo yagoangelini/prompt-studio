@@ -156,6 +156,7 @@ export function SettingsView({ onClose }: SettingsViewProps) {
       <div className="flex-1 min-h-0 p-6">
         <div className="max-w-6xl mx-auto h-full">
           <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full flex flex-col">
+            <h1 className="text-lg font-semibold mb-3">Configurações</h1>
             <div className="flex items-center justify-between gap-2 mb-6">
               <div className="flex items-center gap-4 min-w-0">
                 <TabsList className="grid w-full grid-cols-4 max-w-2xl flex-shrink-0">
@@ -185,7 +186,8 @@ export function SettingsView({ onClose }: SettingsViewProps) {
                       <div className="space-y-2">
                         <p>Organize seus prompts em categorias com cores, para identificá-los e filtrá-los com facilidade.</p>
                         <p><strong>Criar:</strong> clique em "Nova categoria" para adicionar categorias personalizadas, com nome, descrição e cor.</p>
-                        <p><strong>Gerenciar:</strong> edite ou exclua categorias pelos botões que aparecem ao passar o mouse sobre cada cartão de categoria.</p>
+                        <p><strong>Subcategorias:</strong> escolha uma "Categoria pai" ou use "Nova subcategoria" no menu ⋮ de uma categoria. Filtrar por uma categoria inclui as subcategorias dela.</p>
+                        <p><strong>Gerenciar:</strong> edite ou exclua categorias pelo menu ⋮ de cada linha.</p>
                         <p><strong>Uso:</strong> veja quantos prompts há em cada categoria para entender como sua biblioteca está organizada.</p>
                       </div>
                     }
@@ -211,7 +213,8 @@ export function SettingsView({ onClose }: SettingsViewProps) {
                     title="Configurações gerais"
                     description={
                       <div className="space-y-2">
-                        <p>Veja os atalhos de teclado disponíveis para trabalhar com mais agilidade.</p>
+                        <p>Configure o colar rápido e veja os atalhos de teclado disponíveis para trabalhar com mais agilidade.</p>
+                        <p><strong>Colar rápido:</strong> um atalho que funciona em qualquer programa abre a lista de prompts; Enter ou clique cola o prompt onde está o cursor.</p>
                         <p><strong>Tema:</strong> para mudar a aparência, use o seletor de tema na barra lateral ou o atalho Ctrl+T.</p>
                       </div>
                     }
@@ -223,9 +226,11 @@ export function SettingsView({ onClose }: SettingsViewProps) {
                     title="Gerenciamento de dados"
                     description={
                       <div className="space-y-2">
-                        <p>Faça cópias dos seus prompts, importe prompts de arquivos ou recomece do zero.</p>
+                        <p>Faça cópias dos seus prompts, importe prompts de arquivos, leve-os para o Claude Code ou recomece do zero.</p>
                         <p><strong>Exportar:</strong> salve seus prompts em JSON (com categorias e templates) ou em TXT.</p>
                         <p><strong>Importar:</strong> adicione prompts de um arquivo JSON ou TXT; os prompts atuais são mantidos.</p>
+                        <p><strong>Claude Code:</strong> gere comandos (/nome-do-prompt) na pasta .claude/commands de um projeto.</p>
+                        <p><strong>Backup automático:</strong> uma cópia diária do banco de dados numa pasta que você escolher, com restauração em um clique.</p>
                         <p><strong>Restaurar configurações de fábrica:</strong> exclua permanentemente todos os dados e preferências e restaure o conteúdo de exemplo.</p>
                       </div>
                     }

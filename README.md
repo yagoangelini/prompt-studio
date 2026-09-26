@@ -14,16 +14,25 @@ Um aplicativo desktop poderoso para gerenciar, organizar e testar prompts de IA 
 
 ### 🎯 Funcionalidades principais
 - **Dois modos de operação**: alterne entre o aplicativo desktop completo e o modo barra de menus compacto
-- **Organização inteligente**: categorias, tags e favoritos para organizar seus prompts com eficiência
-- **Histórico de versões**: acompanhe as alterações nos seus prompts com versionamento automático
+- **Organização inteligente**: categorias e subcategorias, tags, favoritos e prompts fixados no topo
+- **Sequências passo a passo**: transforme uma categoria em um fluxo ordenado (arraste para reordenar) e use "Copiar próximo passo"
+- **Ações em massa**: selecione vários prompts para mover, marcar, expor no servidor MCP, exportar ou excluir de uma vez
+- **Histórico de versões**: acompanhe as alterações com versionamento automático, compare duas versões lado a lado e restaure qualquer uma
 - **Sistema de templates**: crie templates reutilizáveis com substituição de variáveis
 - **Busca e filtros**: busca poderosa em todos os prompts, com várias opções de filtro (veja a [sintaxe de busca](#sintaxe-de-busca))
 
+### ⚡ Produtividade
+- **Colar rápido (como o Windows+V)**: um atalho global (padrão `Ctrl+Shift+Espaço`) abre a lista de prompts por cima de qualquer programa; Enter ou clique cola o prompt onde está o cursor (veja [Colar rápido](#colar-rápido))
+- **Preencher variáveis ao copiar**: prompts com `{{variáveis}}` pedem os valores antes de copiar ou colar
+- **Paleta de comandos**: `Ctrl/Cmd + K` busca prompts e executa ações só pelo teclado
+- **Mais usados**: o app conta quantas vezes cada prompt foi usado e ordena por uso
+- **Editor aprimorado**: destaque das variáveis, pré-visualização em Markdown e estimativa de tokens
+
 ### 🚀 Teste de prompts
-- **Testes em tempo real**: teste prompts na API da OpenAI ou em endpoints personalizados
-- **Vários modelos**: suporte a GPT-3.5, GPT-4 e outros modelos compatíveis
-- **Análise de respostas**: acompanhamento do uso de tokens e do tempo de resposta
-- **Copiar e compartilhar**: integração simples com a área de transferência para compartilhar rapidamente
+- **OpenAI e Anthropic (Claude)**: teste prompts na API da OpenAI, em endpoints compatíveis ou na API da Anthropic
+- **Histórico e comparação**: cada teste fica salvo; compare duas execuções ou dois modelos lado a lado
+- **Análise de respostas**: uso de tokens e tempo de resposta
+- **Copiar e compartilhar**: integração simples com a área de transferência
 
 ### 🔌 Servidor MCP
 - **Seus prompts no Claude Code e no Claude Desktop**: exponha prompts escolhidos por um servidor MCP local (Streamable HTTP), com as variáveis `{{...}}` como argumentos (veja [Servidor MCP](#servidor-mcp))
@@ -38,8 +47,9 @@ Um aplicativo desktop poderoso para gerenciar, organizar e testar prompts de IA 
 
 ### 📁 Gerenciamento de dados
 - **Importar/Exportar**: suporte aos formatos JSON e texto simples
+- **Comandos do Claude Code**: exporte prompts como comandos (`/nome-do-prompt`) para a pasta `.claude/commands` de um projeto (veja [Exportar para o Claude Code](#exportar-para-o-claude-code))
+- **Backup automático**: cópia diária do banco de dados numa pasta que você escolher, com restauração em um clique (veja [Backup automático](#backup-automático))
 - **Persistência de dados**: armazenamento seguro em SQLite no seu diretório de dados do usuário
-- **Pronto para backup**: backup e migração do banco de dados de forma simples
 - **Multiplataforma**: funciona no Windows, macOS e Linux
 
 ## 📋 Requisitos
@@ -205,6 +215,35 @@ Os aplicativos gerados ficam disponíveis no diretório `dist/`.
 - **Favoritos**: acesso com um clique aos prompts marcados como favoritos
 - **Criação rápida**: crie prompts rapidamente, só com os campos essenciais
 
+### Colar rápido
+
+Funciona como a área de transferência do Windows (`Windows + V`), mas com os seus prompts:
+
+1. Em qualquer programa (terminal com o Claude Code, navegador, editor), pressione `Ctrl + Shift + Espaço`
+2. Digite para filtrar (sem se preocupar com acentos) ou use as setas
+3. Pressione **Enter** ou **clique** no prompt: ele é colado onde estava o cursor. Se o prompt tiver `{{variáveis}}`, o app pede os valores antes
+4. `Ctrl + Enter` só copia; `Esc` fecha
+
+O atalho, a opção de colar automaticamente e o liga/desliga ficam em **Configurações > Geral > Colar rápido**. Se o atalho já for usado por outro programa (por exemplo, o VS Code usa `Ctrl + Shift + Espaço`), escolha outra combinação ali.
+
+> ⚠️ No Windows, programas executados como administrador não aceitam a colagem simulada: nesse caso o prompt fica copiado e basta colar com `Ctrl + V`. No macOS é preciso permitir o Prompt Studio em **Acessibilidade**; no Linux, ter o `xdotool` instalado.
+
+### Sequências passo a passo
+
+Marque uma categoria como **sequência** (no formulário da categoria) para tratar os prompts dela como etapas de um fluxo, como "Crie um plano" → "Revise a segurança" → "Analise o plano":
+
+- Ao filtrar pela categoria, os passos aparecem numerados; reordene arrastando, pelos botões ↑/↓ ou com `Alt + ↑/↓`
+- **Copiar próximo passo** copia a próxima etapa e avança; **Recomeçar** volta ao primeiro passo
+- Não é preciso numerar os títulos: a ordem fica guardada no app
+
+### Exportar para o Claude Code
+
+Em **Configurações > Dados > Exportar para o Claude Code** (ou nas ações em massa), escolha a pasta do projeto. O app grava um arquivo por prompt em `.claude/commands/<categoria>/<prompt>.md`, que o Claude Code mostra como comando (`/<prompt>`). As variáveis `{{...}}` viram argumentos do comando. Arquivos que você mesmo criou nessa pasta nunca são sobrescritos.
+
+### Backup automático
+
+Em **Configurações > Dados > Backup automático**, ative o backup e escolha uma pasta (de preferência sincronizada, como OneDrive ou Google Drive). O app faz uma cópia completa do banco de dados por dia e guarda as mais recentes (10 por padrão). Para voltar a um backup, clique em **Restaurar**: antes de substituir os dados, o app faz um backup de segurança do estado atual e depois reinicia.
+
 ### Sintaxe de busca
 
 Além do texto livre (que procura no título, no conteúdo e na descrição dos prompts), o campo de busca aceita operadores para refinar os resultados. Você pode combinar vários operadores na mesma busca.
@@ -214,7 +253,7 @@ Além do texto livre (que procura no título, no conteúdo e na descrição dos 
 | `tag:` | Filtra por tag. Separe várias tags com vírgula: basta o prompt ter uma delas | `tag:IA,Escrita` |
 | `titulo:` | Procura somente no título | `titulo:resumo` |
 | `conteudo:` | Procura somente no conteúdo | `conteudo:"passo a passo"` |
-| `categoria:` | Filtra por categoria | `categoria:Marketing` |
+| `categoria:` | Filtra por categoria (inclui as subcategorias) | `categoria:Marketing` |
 | `favorito:sim` | Mostra somente os favoritos | `favorito:sim` |
 | `favorito:nao` | Mostra somente os prompts que não são favoritos | `favorito:nao` |
 
@@ -228,11 +267,15 @@ Além do texto livre (que procura no título, no conteúdo e na descrição dos 
 
 | Ação | Atalho |
 |------|--------|
+| Colar rápido (em qualquer programa) | `Ctrl/Cmd + Shift + Espaço` (configurável) |
+| Paleta de comandos | `Ctrl/Cmd + K` |
 | Novo prompt | `Ctrl/Cmd + N` |
 | Buscar | `Ctrl/Cmd + F` |
 | Salvar prompt | `Ctrl/Cmd + S` |
 | Alternar tema | `Ctrl/Cmd + T` |
 | Alternar para o modo desktop | `Ctrl/Cmd + O` (no modo barra de menus) |
+| Selecionar os prompts filtrados | `Ctrl/Cmd + A` (fora de campos de texto) |
+| Mover um passo da sequência | `Alt + ↑/↓` |
 
 ## 🔧 Configuração
 
@@ -241,7 +284,8 @@ Além do texto livre (que procura no título, no conteúdo e na descrição dos 
 1. Abra a aba **Testes** e depois **Configuração**
 2. Informe sua **chave de API** (ela fica só na memória enquanto o app está aberto e é enviada apenas ao endpoint configurado)
 3. Escolha ou digite o **modelo** de sua preferência
-4. Se quiser, configure um **endpoint da API** personalizado, compatível com o formato de chat da OpenAI (`/v1/chat/completions`)
+4. Escolha o **provedor**: "OpenAI e compatíveis" (formato `/v1/chat/completions`, também para endpoints personalizados) ou "Anthropic (Claude)" (Messages API, `/v1/messages`)
+5. Se quiser, configure um **endpoint da API** personalizado
 
 ### Servidor MCP
 

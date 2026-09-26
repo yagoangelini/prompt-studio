@@ -2,7 +2,9 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'http'
 import type { Socket } from 'net'
 import { createHash, timingSafeEqual } from 'crypto'
 import type { Database } from 'sqlite3'
-import { getAllPrompts, applyTemplateVariables, extractTemplateVariables } from './database/queries'
+import { getAllPrompts } from './database/queries'
+// Same {{variable}} rule as the rest of the app, for the argument list and the substitution alike
+import { extractVariables, parseVariableName, substituteVariables } from '../src/components/templates/template-variables'
 import type {
   Prompt,
   McpLogLevel,
@@ -102,20 +104,32 @@ const slugify = (title: string): string =>
     .slice(0, 64)
     .replace(/-+$/, '')
 
-// A variable name is any text without braces (substitution is literal, so no escaping is needed)
-const isValidVariableName = (name: string) => name.trim().length > 0 && name.length <= 100 && !/[{}]/.test(name)
+const promptSlug = (title: string) => slugify(title) || 'prompt'
 
-// Variables sent by a client: { "nome": "valor" }. Returns the map or a pt-BR error message.
-export const parseVariables = (value: unknown): Record<string, string> | string => {
-  if (value === undefined || value === null) return {}
+// MCP name of an exposed prompt, a function of its own title and id only: the slug of the title when no
+// other prompt (exposed or not) has the same slug, otherwise slug + "_" + id ("resumo_12"). So a name
+// never moves to another prompt when prompts are exposed, hidden, created or renamed: it can only
+// disappear while a namesake exists. Slugs never contain "_", so "slug_id" cannot clash with a plain slug.
+export const mcpPromptName = (prompt: Pick<Prompt, 'id' | 'title'>, slugCounts: ReadonlyMap<string, number>) => {
+  const slug = promptSlug(prompt.title)
+  return (slugCounts.get(slug) ?? 0) > 1 ? `${slug}_${prompt.id}` : slug
+}
+
+// Variables sent by a client: { "nome": "valor" }. Names follow the app rule (letters, digits and "_",
+// the same one used to list the arguments). Returns the map or a pt-BR error message.
+export const parseVariables = (value: unknown): Map<string, string> | string => {
+  const result = new Map<string, string>()
+  if (value === undefined || value === null) return result
   if (!isPlainObject(value)) return 'As variáveis devem ser um objeto no formato { "nome": "valor" }'
-  const result: Record<string, string> = {}
   for (const [key, raw] of Object.entries(value)) {
-    if (!isValidVariableName(key)) return `Nome de variável inválido: "${key.slice(0, 50)}"`
+    const parsed = key.length <= 100 ? parseVariableName(key) : null
+    if (!parsed?.ok) {
+      return `Nome de variável inválido: "${key.slice(0, 50)}". Use apenas letras, números e _ (sem espaços, hífens ou pontos).`
+    }
     if (raw === null || typeof raw === 'object' || typeof raw === 'function') {
       return `O valor da variável "${key.slice(0, 50)}" deve ser um texto`
     }
-    result[key.trim()] = String(raw)
+    result.set(parsed.name, String(raw))
   }
   return result
 }
@@ -133,6 +147,8 @@ class McpServer {
   private db: Database
   // secureHash -> prompt id
   private exposedPrompts: Map<string, number> = new Map()
+  // Bumped whenever the exposure list is replaced (a pending prune must not touch the new list)
+  private exposureGeneration = 0
   private requestCounts: Map<string, { count: number; resetTime: number }> = new Map()
   private rateLimitCleanup: ReturnType<typeof setInterval> | null = null
   private sockets: Set<Socket> = new Set()
@@ -182,6 +198,7 @@ class McpServer {
   // Returns how many prompts are exposed. Entries without a valid secure hash are ignored.
   updateExposedPrompts(prompts: unknown): number {
     this.exposedPrompts.clear()
+    this.exposureGeneration++
     const ids = new Set<number>()
     if (Array.isArray(prompts)) {
       for (const entry of prompts) {
@@ -195,6 +212,32 @@ class McpServer {
     }
     this.log('info', `Prompts expostos atualizados: ${this.exposedPrompts.size}`)
     return this.exposedPrompts.size
+  }
+
+  // Drops the exposures whose prompt no longer exists (deleted in any window or by any path), so the
+  // status only counts prompts that exist. Ids are never reused (AUTOINCREMENT), so dropping is final.
+  async pruneDeletedPrompts(): Promise<void> {
+    if (this.exposedPrompts.size === 0) return
+    const generation = this.exposureGeneration
+    try {
+      const rows = await new Promise<Array<{ id: number }>>((resolve, reject) => {
+        this.db.all('SELECT id FROM prompts', (error: Error | null, result: Array<{ id: number }>) =>
+          error ? reject(error) : resolve(result))
+      })
+      if (generation === this.exposureGeneration) this.dropMissingPrompts(new Set(rows.map((row) => row.id)))
+    } catch (error) {
+      console.error('[MCP Server] Failed to check the exposed prompts:', error)
+    }
+  }
+
+  private dropMissingPrompts(existing: { has(id: number): boolean }) {
+    let removed = 0
+    for (const [hash, id] of this.exposedPrompts) {
+      if (existing.has(id)) continue
+      this.exposedPrompts.delete(hash)
+      removed++
+    }
+    if (removed > 0) this.log('info', `Prompts excluídos retirados da lista de expostos: ${removed}`)
   }
 
   private log(level: McpLogLevel, message: string, detail?: unknown) {
@@ -349,21 +392,26 @@ class McpServer {
 
   private async loadExposedEntries(): Promise<ExposedEntry[]> {
     if (this.exposedPrompts.size === 0) return []
+    const generation = this.exposureGeneration
     const prompts = await getAllPrompts(this.db)
     const byId = new Map(prompts.map((prompt) => [prompt.id, prompt]))
-    const exposed = [...this.exposedPrompts.entries()]
+    if (generation === this.exposureGeneration) this.dropMissingPrompts(byId)
+    // Every prompt counts, exposed or not, so exposing or hiding one never renames another
+    const slugCounts = new Map<string, number>()
+    for (const prompt of prompts) {
+      const slug = promptSlug(prompt.title)
+      slugCounts.set(slug, (slugCounts.get(slug) ?? 0) + 1)
+    }
+    return [...this.exposedPrompts.entries()]
       .map(([hash, id]) => ({ hash, prompt: byId.get(id) }))
       .filter((entry): entry is { hash: string; prompt: Prompt } => entry.prompt !== undefined)
       .sort((a, b) => a.prompt.id - b.prompt.id)
-
-    const usedNames = new Set<string>()
-    return exposed.map(({ hash, prompt }) => {
-      const base = slugify(prompt.title) || 'prompt'
-      let name = base
-      for (let n = 2; usedNames.has(name); n++) name = `${base}-${n}`
-      usedNames.add(name)
-      return { hash, name, prompt, variables: extractTemplateVariables(prompt.content) }
-    })
+      .map(({ hash, prompt }) => ({
+        hash,
+        name: mcpPromptName(prompt, slugCounts),
+        prompt,
+        variables: extractVariables(prompt.content),
+      }))
   }
 
   private async findEntry(nameOrHash: string): Promise<ExposedEntry | undefined> {
@@ -482,11 +530,11 @@ class McpServer {
         const variables = parseVariables(isPlainObject(params) ? params.variables : undefined)
         if (typeof variables === 'string') return this.sendError(res, 400, 'Requisição inválida', variables)
         return this.sendJson(res, 200, {
-          prompt: applyTemplateVariables(entry.prompt.content, variables),
+          prompt: substituteVariables(entry.prompt.content, variables),
           metadata: {
             title: entry.prompt.title,
             description: entry.prompt.description,
-            parameters_applied: variables,
+            parameters_applied: Object.fromEntries(variables),
           },
         })
       }
@@ -644,7 +692,7 @@ class McpServer {
         return {
           ...(entry.prompt.description ? { description: entry.prompt.description } : {}),
           messages: [
-            { role: 'user', content: { type: 'text', text: applyTemplateVariables(entry.prompt.content, variables) } },
+            { role: 'user', content: { type: 'text', text: substituteVariables(entry.prompt.content, variables) } },
           ],
         }
       }
@@ -693,7 +741,7 @@ class McpServer {
         const variables = parseVariables(input.variaveis)
         if (typeof variables === 'string') return toolError(variables)
         this.log('info', `Ferramenta ${MCP_TOOL_NAME} usada: ${entry.name}`)
-        return { content: [{ type: 'text', text: applyTemplateVariables(entry.prompt.content, variables) }] }
+        return { content: [{ type: 'text', text: substituteVariables(entry.prompt.content, variables) }] }
       }
 
       default:

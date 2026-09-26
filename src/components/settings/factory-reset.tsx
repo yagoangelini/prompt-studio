@@ -109,6 +109,10 @@ export function FactoryReset() {
                 <p className="text-sm text-muted-foreground mt-3">
                   Depois disso, o aplicativo será restaurado com prompts, templates e categorias de exemplo para ajudar você a recomeçar, e o tema volta para "Sistema".
                 </p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  O backup automático, os arquivos de backup já feitos e o atalho do colar rápido são mantidos.
+                  Se precisar voltar atrás, restaure um backup em Configurações &gt; Dados.
+                </p>
               </div>
             </div>
           </div>

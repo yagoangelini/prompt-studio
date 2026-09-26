@@ -4,7 +4,7 @@ import { MoreHorizontal, Keyboard, Settings, Play, Square, Wifi, WifiOff, PanelT
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { KeyboardShortcutsHelp } from '@/components/keyboard-shortcuts-help'
-import { usePromptStore } from '@/stores/usePromptStore'
+import { usePromptStore, getMcpPortError } from '@/stores/usePromptStore'
 import { Badge } from '@/components/ui/badge'
 
 interface AppHeaderProps {
@@ -72,6 +72,12 @@ export function AppHeader({ className }: AppHeaderProps) {
         title: 'Não foi possível iniciar o servidor',
         description: 'Primeiro, exponha pelo menos um prompt na aba Servidor MCP'
       })
+      return
+    }
+    // An invalid value in the port field must not start the server on the last valid port
+    const invalidPort = getMcpPortError(usePromptStore.getState())
+    if (invalidPort) {
+      addToast({ type: 'error', title: 'Porta inválida', description: invalidPort })
       return
     }
 

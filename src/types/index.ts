@@ -410,6 +410,9 @@ export interface BackupRestoreResult {
 }
 
 // ---- "Testes" panel history ----
+// Where a test run was executed: "Testar prompt" (and re-runs) or "Comparar modelos"
+export type TestRunSource = 'test' | 'compare'
+
 export interface TestRun {
   readonly id: number
   readonly prompt_id: number | null
@@ -424,6 +427,7 @@ export interface TestRun {
   readonly response_time_ms: number | null
   readonly input_tokens: number | null
   readonly output_tokens: number | null
+  readonly source: TestRunSource
   readonly created_at: string
 }
 

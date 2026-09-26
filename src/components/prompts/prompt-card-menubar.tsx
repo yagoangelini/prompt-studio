@@ -8,6 +8,7 @@ import { usePromptStore } from '@/stores/usePromptStore'
 import { formatDistanceToNow } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
 import { cn, parseDbDate } from '@/lib/utils'
+import { copyPrompt } from '@/lib/copy-prompt'
 import type { Prompt } from '@/types'
 
 interface MenubarPromptCardProps {
@@ -21,7 +22,7 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
   const [contentHeight, setContentHeight] = useState(192) // Default 192px (h-48)
   const [isDragging, setIsDragging] = useState(false)
   
-  const { updatePrompt, duplicatePrompt, addToast } = usePromptStore()
+  const { updatePrompt, duplicatePrompt } = usePromptStore()
 
   const handleFavoriteToggle = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -34,21 +35,39 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
     }
   }
 
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation()
+  // Fills the {{variables}} first (if any), copies, counts the usage and shows the toast. `origin`
+  // gets the focus back when the variables dialog closes (it has no trigger, so the focus would land on
+  // <body> and the arrows would start over from the first card).
+  const copy = async (origin: HTMLElement | null) => {
     try {
-      await window.electronAPI.copyToClipboard(prompt.content)
-      setJustCopied(true)
-      setTimeout(() => setJustCopied(false), 2000)
-      
-      addToast({
-        type: 'success',
-        title: 'Copiado',
-        description: 'Prompt copiado para a área de transferência'
-      })
+      if (await copyPrompt(prompt)) {
+        setJustCopied(true)
+        setTimeout(() => setJustCopied(false), 2000)
+      }
     } catch (error) {
       console.error('Failed to copy:', error)
+    } finally {
+      // After the dialog is gone: its focus scope gives the focus away right after unmounting
+      setTimeout(() => {
+        const active = document.activeElement
+        const lost = !active || active === document.body
+        if (origin?.isConnected && lost) origin.focus()
+      }, 50)
     }
+  }
+
+  const handleCopy = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
+    void copy(e.currentTarget.closest<HTMLElement>('[data-menubar-card]'))
+  }
+
+  // Enter on the card itself (not on one of its buttons) copies it; the menu bar layout moves the
+  // focus between cards with the arrows
+  const handleCardKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Enter' || e.target !== e.currentTarget || e.nativeEvent.isComposing) return
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
+    e.preventDefault()
+    void copy(e.currentTarget)
   }
 
   const handleEdit = (e: React.MouseEvent) => {
@@ -107,11 +126,17 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
   return (
     <TooltipProvider>
       <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-        <div 
+        <div
+          tabIndex={0}
+          role="group"
+          aria-label={`${prompt.title} (Enter copia)`}
+          aria-keyshortcuts="Enter"
+          data-menubar-card=""
+          onKeyDown={handleCardKeyDown}
           className={cn(
             "group border rounded-lg transition-all duration-200",
             isExpanded ? "bg-accent/50 border-accent" : "hover:border-accent hover:bg-accent/20",
-            "relative"
+            "relative outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-accent"
           )}
         >
           {/* Main Card Content */}
