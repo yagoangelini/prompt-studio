@@ -1,53 +1,53 @@
-# Electron Dual-Mode App Boilerplate Instructions for Claude Code
+# Instruções para o Claude Code: boilerplate de app Electron com dois modos
 
-Please create a complete Electron application with the following specifications:
+Crie um aplicativo Electron completo com as seguintes especificações:
 
-## Core Requirements
+## Requisitos principais
 
-### 1. Dual Mode Operation
-- **Desktop Mode**: Traditional windowed application (1200x800px)
-- **Menu Bar Mode**: Small dropdown window from system tray/menu bar (400x600px)
-- Toggle between modes via context menu
-- Save mode preference in database
-- Force desktop mode on first run to ensure visibility
+### 1. Operação em dois modos
+- **Modo desktop**: aplicativo tradicional em janela (1200x800px)
+- **Modo barra de menus**: pequena janela suspensa aberta a partir da bandeja do sistema/barra de menus (400x600px)
+- Alternar entre os modos pelo menu de contexto
+- Salvar a preferência de modo no banco de dados
+- Forçar o modo desktop na primeira execução, para garantir que a janela fique visível
 
-### 2. Database Integration
-- Use SQLite3 as the primary database
-- Create database initialization module with:
-  - Connection management
-  - Table creation scripts
-  - Migration support
-- Store database in app's userData directory
-- Include basic CRUD operations module
+### 2. Integração com banco de dados
+- Usar o SQLite3 como banco de dados principal
+- Criar um módulo de inicialização do banco de dados com:
+  - Gerenciamento de conexão
+  - Scripts de criação de tabelas
+  - Suporte a migrações
+- Armazenar o banco de dados no diretório userData do app
+- Incluir um módulo com as operações CRUD básicas
 
-### 3. Project Structure
+### 3. Estrutura do projeto
 ```
 project-name/
-├── main.js                 # Main Electron process
-├── package.json           # Dependencies and scripts
+├── main.js                 # Processo principal do Electron
+├── package.json           # Dependências e scripts
 ├── assets/
-│   └── icon.png          # App icon (256x256 PNG)
+│   └── icon.png          # Ícone do app (PNG 256x256)
 ├── scripts/
-│   ├── run.sh            # Quick run script (Unix)
-│   ├── run.bat           # Quick run script (Windows)
-│   ├── build-app.sh      # Build installer script (Unix)
-│   └── build-app.ps1     # Build script for Windows (PowerShell)
+│   ├── run.sh            # Script de execução rápida (Unix)
+│   ├── run.bat           # Script de execução rápida (Windows)
+│   ├── build-app.sh      # Script de build do instalador (Unix)
+│   └── build-app.ps1     # Script de build para Windows (PowerShell)
 ├── src/
 │   ├── database/
-│   │   ├── init.js       # Database initialization
-│   │   └── queries.js    # Database operations
+│   │   ├── init.js       # Inicialização do banco de dados
+│   │   └── queries.js    # Operações no banco de dados
 │   └── renderer/
-│       ├── index.html    # Main window
-│       ├── menubar.html  # Menu bar window
-│       ├── renderer.js   # Main window logic
-│       ├── menubar-renderer.js # Menu bar logic
-│       ├── styles.css    # Main window styles
-│       └── menubar-styles.css # Menu bar styles
-└── README.md            # Documentation
+│       ├── index.html    # Janela principal
+│       ├── menubar.html  # Janela da barra de menus
+│       ├── renderer.js   # Lógica da janela principal
+│       ├── menubar-renderer.js # Lógica da barra de menus
+│       ├── styles.css    # Estilos da janela principal
+│       └── menubar-styles.css # Estilos da barra de menus
+└── README.md            # Documentação
 ```
 
-### 4. Package.json Configuration
-Include these dependencies:
+### 4. Configuração do package.json
+Inclua estas dependências:
 ```json
 {
   "dependencies": {
@@ -73,18 +73,18 @@ Include these dependencies:
 }
 ```
 
-### 5. Main Process Features (main.js)
-- Create both desktop and menu bar windows
-- System tray icon with context menu
-- IPC handlers for database operations
-- App mode switching functionality
-- Proper window management (hide/show logic)
-- App name and metadata configuration
+### 5. Recursos do processo principal (main.js)
+- Criar as janelas do modo desktop e do modo barra de menus
+- Ícone na bandeja do sistema com menu de contexto
+- Handlers IPC para as operações de banco de dados
+- Funcionalidade de alternância entre os modos do app
+- Gerenciamento adequado das janelas (lógica de mostrar/ocultar)
+- Configuração do nome e dos metadados do app
 
-### 6. Database Schema
-Create initial tables:
+### 6. Esquema do banco de dados
+Crie as tabelas iniciais:
 ```sql
--- Settings table for app configuration
+-- Tabela de configurações do app
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Example data table
+-- Tabela de dados de exemplo
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -102,104 +102,104 @@ CREATE TABLE IF NOT EXISTS items (
 );
 ```
 
-### 7. Renderer Features
-- **Main Window**: Full-featured interface with navigation
-- **Menu Bar Window**: Compact, essential features only
-- Shared styling with CSS variables
-- Responsive design for different window sizes
-- IPC communication with main process
+### 7. Recursos do processo de renderização (renderer)
+- **Janela principal**: interface completa, com navegação
+- **Janela da barra de menus**: compacta, apenas com os recursos essenciais
+- Estilos compartilhados com variáveis CSS
+- Design responsivo para diferentes tamanhos de janela
+- Comunicação IPC com o processo principal
 
-### 8. System Tray Integration
-- Programmatic icon creation (simple chart/graph symbol)
-- Context menu with:
-  - Show/Hide app
-  - Switch mode (Desktop ↔ Menu Bar)
-  - Quit application
-- Template image for dark/light mode compatibility
-- Proper event handling for clicks
+### 8. Integração com a bandeja do sistema
+- Criação programática do ícone (um símbolo simples de gráfico)
+- Menu de contexto com:
+  - Mostrar/Ocultar o app
+  - Alternar modo (Desktop ↔ Barra de menus)
+  - Sair do aplicativo
+- Imagem do tipo template (template image) para compatibilidade com os modos claro e escuro
+- Tratamento adequado dos eventos de clique
 
-### 9. Build Scripts
+### 9. Scripts de build
 
-#### run.sh (Development, Unix)
+#### run.sh (desenvolvimento, Unix)
 ```bash
 #!/bin/bash
-# Quick development runner for Unix
-# Check dependencies, install if needed, start app
+# Execução rápida em desenvolvimento para Unix
+# Verifica as dependências, instala se necessário e inicia o app
 ```
 
-#### run.bat (Development, Windows)
+#### run.bat (desenvolvimento, Windows)
 ```bat
 @echo off
-REM Quick development runner for Windows
-REM Check dependencies, install if needed, start app
+REM Execução rápida em desenvolvimento para Windows
+REM Verifica as dependências, instala se necessário e inicia o app
 ```
 
-#### build-app.sh (Production, Unix)
+#### build-app.sh (produção, Unix)
 ```bash
 #!/bin/bash
-# Production build script for Unix
-# Create distributable packages for current platform
+# Script de build de produção para Unix
+# Cria pacotes distribuíveis para a plataforma atual
 ```
 
-#### build-app.ps1 (Production, Windows PowerShell)
+#### build-app.ps1 (produção, Windows PowerShell)
 ```powershell
-# Production build script for Windows PowerShell
-# Create distributable packages for current platform
+# Script de build de produção para o Windows PowerShell
+# Cria pacotes distribuíveis para a plataforma atual
 ```
 
-### 10. Error Handling
-- Database connection errors
-- Missing dependencies
-- Platform-specific issues
-- Graceful fallbacks for all features
+### 10. Tratamento de erros
+- Erros de conexão com o banco de dados
+- Dependências ausentes
+- Problemas específicos de cada plataforma
+- Alternativas (fallbacks) adequadas para todos os recursos
 
-### 11. Platform Compatibility
-- **macOS**: DMG installer, proper .icns icons
-- **Windows**: NSIS installer, .ico icons  
-- **Linux**: AppImage and .deb packages
+### 11. Compatibilidade entre plataformas
+- **macOS**: instalador DMG e ícones .icns adequados
+- **Windows**: instalador NSIS e ícones .ico
+- **Linux**: pacotes AppImage e .deb
 
-### 12. Development Features
-- Hot reload in dev mode
-- Console logging for debugging
-- Error boundaries and recovery
-- Proper cleanup on app exit
+### 12. Recursos de desenvolvimento
+- Hot reload no modo de desenvolvimento
+- Logs no console para depuração
+- Error boundaries e recuperação de erros
+- Limpeza adequada ao encerrar o app
 
-## Implementation Notes
+## Observações de implementação
 
-1. **Start with desktop mode forced** to ensure the app window is visible
-2. **Use absolute paths** for all file references
-3. **Include comprehensive error logging** for troubleshooting
-4. **Test on ARM64 and x86_64** architectures
-5. **Follow Electron security best practices**
-6. **Include proper app metadata** (name, version, description)
+1. **Inicie com o modo desktop forçado** para garantir que a janela do app fique visível
+2. **Use caminhos absolutos** em todas as referências a arquivos
+3. **Inclua um registro de erros abrangente** para facilitar a solução de problemas
+4. **Teste nas arquiteturas ARM64 e x86_64**
+5. **Siga as boas práticas de segurança do Electron**
+6. **Inclua os metadados adequados do app** (nome, versão, descrição)
 
-## File Templates Required
+## Templates de arquivos necessários
 
-1. **main.js** - Complete main process with all features
-2. **Database modules** - init.js and queries.js with full CRUD
-3. **HTML templates** - Both window types with proper structure
-4. **CSS files** - Clean, modern styling
-5. **Package.json** - Complete with all dependencies and scripts
-6. **Shell scripts** - Working run.sh, run.bat, build-app.sh, and build-app.ps1
-7. **README.md** - Full documentation and setup instructions
+1. **main.js** - processo principal completo, com todos os recursos
+2. **Módulos de banco de dados** - init.js e queries.js com CRUD completo
+3. **Templates HTML** - os dois tipos de janela, com a estrutura adequada
+4. **Arquivos CSS** - estilos limpos e modernos
+5. **package.json** - completo, com todas as dependências e scripts
+6. **Scripts de shell** - run.sh, run.bat, build-app.sh e build-app.ps1 funcionando
+7. **README.md** - documentação completa e instruções de configuração
 
-## Testing Checklist
+## Checklist de testes
 
-After implementation, verify:
-- [ ] App starts in desktop mode with visible window
-- [ ] Database creates successfully in userData directory
-- [ ] System tray icon appears and functions
-- [ ] Mode switching works correctly
-- [ ] Build scripts create working installers
-- [ ] All IPC communication functions
-- [ ] App handles errors gracefully
-- [ ] Both window types render correctly
+Após a implementação, verifique se:
+- [ ] O app inicia no modo desktop com a janela visível
+- [ ] O banco de dados é criado com sucesso no diretório userData
+- [ ] O ícone da bandeja do sistema aparece e funciona
+- [ ] A alternância de modos funciona corretamente
+- [ ] Os scripts de build geram instaladores funcionais
+- [ ] Toda a comunicação IPC funciona
+- [ ] O app trata os erros de forma adequada
+- [ ] Os dois tipos de janela são renderizados corretamente
 
-## Example App Concept
-Create a simple "Task Manager" app that demonstrates all features:
-- Add/edit/delete tasks (database operations)
-- View tasks in both desktop and menu bar modes
-- Settings for app behavior
-- Task notifications/alerts
+## Conceito de app de exemplo
+Crie um app simples de "Gerenciador de tarefas" que demonstre todos os recursos:
+- Adicionar/editar/excluir tarefas (operações no banco de dados)
+- Visualizar as tarefas nos modos desktop e barra de menus
+- Configurações do comportamento do app
+- Notificações/alertas de tarefas
 
-This boilerplate should result in a fully functional, production-ready Electron application that can serve as a foundation for any desktop/menu bar app project.
+Este boilerplate deve resultar em um aplicativo Electron totalmente funcional e pronto para produção, que sirva de base para qualquer projeto de app desktop/barra de menus.

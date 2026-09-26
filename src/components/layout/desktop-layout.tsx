@@ -11,20 +11,20 @@ import { usePromptStore } from '@/stores/usePromptStore'
 
 export function DesktopLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const { 
-    isPromptEditorOpen, 
-    isPromptViewerOpen, 
+  // The main tab (Prompts, Templates...) lives in the store, so MainContent keeps it when it is
+  // remounted by opening or closing the right panel
+  const {
+    isPromptEditorOpen,
+    isPromptViewerOpen,
     isSettingsOpen,
     isTemplateEditorOpen,
     selectedPrompt,
-    selectedTemplate,
     closePromptViewer,
-    closeSettings,
-    closeTemplateEditor
+    closeSettings
   } = usePromptStore()
-  
-  // Determine if right panel should be shown
-  const showRightPanel = isPromptEditorOpen || isPromptViewerOpen || isTemplateEditorOpen
+
+  // Determine if right panel should be shown (never an empty panel)
+  const showRightPanel = isPromptEditorOpen || isTemplateEditorOpen || (isPromptViewerOpen && selectedPrompt !== null)
 
   return (
     <div className="h-screen bg-background overflow-hidden flex flex-col">

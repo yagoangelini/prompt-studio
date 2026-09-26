@@ -49,6 +49,20 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
   }, [])
 
+  // Keep the windows in sync: the menu bar popup is no longer reloaded when shown, so a theme chosen
+  // in the other window (or reset by a factory reset) arrives through the storage event
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      // key === null means the whole storage was cleared
+      if (event.key !== null && event.key !== 'prompt-studio-theme') return
+      const newTheme = event.key === null ? null : event.newValue
+      const validThemes: string[] = ['light', 'dark', 'system', 'midnight', 'ocean', 'forest', 'macos', 'matte', 'cosmic', 'sunset', 'arctic', 'rose']
+      setTheme(newTheme && validThemes.includes(newTheme) ? (newTheme as Theme) : 'system')
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
+
   useEffect(() => {
     // Save theme to localStorage with better key
     try {
@@ -78,6 +92,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         setActualTheme(newTheme)
       }
       
+      setActualTheme(resolvedTheme)
       mediaQuery.addEventListener('change', handleChange)
       return () => mediaQuery.removeEventListener('change', handleChange)
     } else {
@@ -97,6 +112,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
     
     setActualTheme(resolvedTheme)
+    return undefined
   }, [theme])
 
   const handleSetTheme = (newTheme: Theme) => {

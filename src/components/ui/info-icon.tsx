@@ -23,7 +23,7 @@ export function InfoIcon({ title, description, className }: InfoIconProps) {
           className={cn("h-6 w-6 p-0 text-muted-foreground hover:text-foreground", className)}
         >
           <Info className="h-4 w-4" />
-          <span className="sr-only">More information</span>
+          <span className="sr-only">Mais informações</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-80" align="start">

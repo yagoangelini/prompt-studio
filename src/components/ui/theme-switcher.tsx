@@ -17,92 +17,128 @@ interface ThemeOption {
 const themeOptions: ThemeOption[] = [
   {
     value: 'system',
-    label: 'System',
+    label: 'Sistema',
     icon: Monitor,
-    description: 'Follow system preference',
+    description: 'Segue a preferência do sistema',
     preview: 'Auto'
   },
   {
     value: 'light',
-    label: 'Light',
+    label: 'Claro',
     icon: Sun,
-    description: 'Light theme',
+    description: 'Tema claro',
     preview: '🌕'
   },
   {
     value: 'dark',
-    label: 'Dark',
+    label: 'Escuro',
     icon: Moon,
-    description: 'Dark theme',
+    description: 'Tema escuro',
     preview: '🌑'
   },
   {
     value: 'matte',
-    label: 'Matte Black',
+    label: 'Preto fosco',
     icon: Circle,
-    description: 'Pure black matte finish',
+    description: 'Preto puro com acabamento fosco',
     preview: '⚫'
   },
   {
     value: 'midnight',
-    label: 'Midnight',
+    label: 'Meia-noite',
     icon: Moon,
-    description: 'Deep dark with green accents',
+    description: 'Escuro intenso com detalhes em verde',
     preview: '🌌'
   },
   {
     value: 'ocean',
-    label: 'Ocean',
+    label: 'Oceano',
     icon: Droplets,
-    description: 'Deep blue theme',
+    description: 'Tema em azul profundo',
     preview: '🌊'
   },
   {
     value: 'forest',
-    label: 'Forest',
+    label: 'Floresta',
     icon: Trees,
-    description: 'Nature-inspired green theme',
+    description: 'Tema verde inspirado na natureza',
     preview: '🌲'
   },
   {
     value: 'cosmic',
-    label: 'Cosmic Purple',
+    label: 'Roxo cósmico',
     icon: Sparkles,
-    description: 'Purple cosmic theme',
+    description: 'Tema cósmico em tons de roxo',
     preview: '🔮'
   },
   {
     value: 'sunset',
-    label: 'Sunset',
+    label: 'Pôr do sol',
     icon: Sunset,
-    description: 'Warm amber sunset theme',
+    description: 'Tons quentes de âmbar do pôr do sol',
     preview: '🌅'
   },
   {
     value: 'arctic',
-    label: 'Arctic',
+    label: 'Ártico',
     icon: Snowflake,
-    description: 'Cool icy blue theme',
+    description: 'Tema em tons frios de azul-gelo',
     preview: '❄️'
   },
   {
     value: 'rose',
-    label: 'Rose',
+    label: 'Rosa',
     icon: Heart,
-    description: 'Elegant rose theme',
+    description: 'Tema rosa elegante',
     preview: '🌹'
   },
   {
     value: 'macos',
     label: 'macOS',
     icon: Apple,
-    description: 'macOS-style dark theme',
+    description: 'Tema escuro no estilo do macOS',
     preview: '🍎'
   }
 ]
 
 interface ThemeSwitcherProps {
   collapsed?: boolean
+}
+
+// Shared by both triggers. Wide enough for each description to fit in one line, so the 12 options
+// fit in a 800 px tall window; in smaller windows the list scrolls inside the menu.
+function ThemeMenuContent({ theme, onSelect }: { theme: Theme; onSelect: (theme: Theme) => void }) {
+  return (
+    <DropdownMenuContent side="right" align="end" collisionPadding={8} className="w-96 max-w-[calc(100vw-16px)]">
+      {themeOptions.map((option) => {
+        const Icon = option.icon
+        const isCurrent = theme === option.value
+        return (
+          <DropdownMenuItem
+            key={option.value}
+            onClick={() => onSelect(option.value)}
+            className={cn(
+              "flex items-center gap-3 px-3 py-1.5",
+              isCurrent && "bg-secondary"
+            )}
+          >
+            <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">{option.label}</div>
+              <div className="truncate text-xs text-muted-foreground">{option.description}</div>
+              {isCurrent && <span className="sr-only">(tema atual)</span>}
+            </div>
+            {option.preview && (
+              <span className="shrink-0 text-sm" aria-hidden="true">{option.preview}</span>
+            )}
+            {isCurrent && (
+              <div className="h-2 w-2 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+            )}
+          </DropdownMenuItem>
+        )
+      })}
+    </DropdownMenuContent>
+  )
 }
 
 export function ThemeSwitcher({ collapsed = false }: ThemeSwitcherProps) {
@@ -120,10 +156,11 @@ export function ThemeSwitcher({ collapsed = false }: ThemeSwitcherProps) {
           <Tooltip>
             <TooltipTrigger asChild>
               <DropdownMenuTrigger asChild>
-                <Button 
-                  variant="ghost" 
-                  size="icon" 
+                <Button
+                  variant="ghost"
+                  size="icon"
                   className="h-8 w-8"
+                  aria-label={`Alterar tema (atual: ${currentTheme?.label || 'Desconhecido'})`}
                 >
                   {currentTheme ? (
                     <currentTheme.icon className="h-4 w-4" />
@@ -134,36 +171,10 @@ export function ThemeSwitcher({ collapsed = false }: ThemeSwitcherProps) {
               </DropdownMenuTrigger>
             </TooltipTrigger>
             <TooltipContent side="right">
-              <p>Switch Theme ({currentTheme?.label || 'Unknown'})</p>
+              <p>Alterar tema ({currentTheme?.label || 'Desconhecido'})</p>
             </TooltipContent>
           </Tooltip>
-          <DropdownMenuContent side="right" align="start" className="w-48">
-            {themeOptions.map((option) => {
-              const Icon = option.icon
-              return (
-                <DropdownMenuItem 
-                  key={option.value}
-                  onClick={() => handleThemeChange(option.value)}
-                  className={cn(
-                    "flex items-center space-x-3 px-3 py-2",
-                    theme === option.value && "bg-secondary"
-                  )}
-                >
-                  <Icon className="h-4 w-4" />
-                  <div className="flex-1">
-                    <div className="font-medium">{option.label}</div>
-                    <div className="text-xs text-muted-foreground">{option.description}</div>
-                  </div>
-                  {option.preview && (
-                    <span className="text-sm">{option.preview}</span>
-                  )}
-                  {theme === option.value && (
-                    <div className="h-2 w-2 rounded-full bg-primary" />
-                  )}
-                </DropdownMenuItem>
-              )
-            })}
-          </DropdownMenuContent>
+          <ThemeMenuContent theme={theme} onSelect={handleThemeChange} />
         </DropdownMenu>
       </TooltipProvider>
     )
@@ -176,6 +187,7 @@ export function ThemeSwitcher({ collapsed = false }: ThemeSwitcherProps) {
           variant="ghost"
           size="sm"
           className="w-full justify-start h-8 text-xs"
+          aria-label={`Alterar tema (atual: ${currentTheme?.label || 'Desconhecido'})`}
         >
           {currentTheme ? (
             <currentTheme.icon className="h-4 w-4 mr-2" />
@@ -183,40 +195,14 @@ export function ThemeSwitcher({ collapsed = false }: ThemeSwitcherProps) {
             <Palette className="h-4 w-4 mr-2" />
           )}
           <span className="flex-1 text-left">
-            {currentTheme?.label || 'Theme'}
+            {currentTheme?.label || 'Tema'}
           </span>
           {currentTheme?.preview && (
             <span className="ml-auto text-sm">{currentTheme.preview}</span>
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="start" className="w-56">
-        {themeOptions.map((option) => {
-          const Icon = option.icon
-          return (
-            <DropdownMenuItem 
-              key={option.value}
-              onClick={() => handleThemeChange(option.value)}
-              className={cn(
-                "flex items-center space-x-3 px-3 py-2",
-                theme === option.value && "bg-secondary"
-              )}
-            >
-              <Icon className="h-4 w-4" />
-              <div className="flex-1">
-                <div className="font-medium">{option.label}</div>
-                <div className="text-xs text-muted-foreground">{option.description}</div>
-              </div>
-              {option.preview && (
-                <span className="text-sm">{option.preview}</span>
-              )}
-              {theme === option.value && (
-                <div className="h-2 w-2 rounded-full bg-primary" />
-              )}
-            </DropdownMenuItem>
-          )
-        })}
-      </DropdownMenuContent>
+      <ThemeMenuContent theme={theme} onSelect={handleThemeChange} />
     </DropdownMenu>
   )
 }

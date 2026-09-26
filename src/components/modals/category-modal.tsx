@@ -28,12 +28,12 @@ export function CategoryModal({ open, onOpenChange, category }: CategoryModalPro
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>
-            {category ? 'Edit Category' : 'Create Category'}
+            {category ? 'Editar categoria' : 'Criar categoria'}
           </DialogTitle>
           <DialogDescription>
-            {category 
-              ? 'Update the category details below.'
-              : 'Create a new category to organize your prompts.'}
+            {category
+              ? 'Atualize os detalhes da categoria abaixo.'
+              : 'Crie uma nova categoria para organizar seus prompts.'}
           </DialogDescription>
         </DialogHeader>
         <CategoryForm 

@@ -1,65 +1,78 @@
 import React from 'react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Badge } from './ui/badge'
+import { isMacPlatform } from '@/hooks/use-keyboard-shortcuts'
 
 interface KeyboardShortcutsHelpProps {
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-const shortcuts = [
+// Must match the shortcuts registered in App.tsx (and where each one works, see inTextFields there)
+export const KEYBOARD_SHORTCUTS = [
   {
     key: ['⌘', 'N'],
     pcKey: ['Ctrl', 'N'],
-    action: 'Create new prompt',
-    description: 'Opens the prompt editor to create a new prompt'
+    action: 'Criar novo prompt',
+    description: 'Abre o editor para criar um novo prompt'
   },
   {
     key: ['⌘', 'F'],
     pcKey: ['Ctrl', 'F'],
-    action: 'Focus search',
-    description: 'Focuses and selects the search input field'
+    action: 'Ir para a busca',
+    description: 'Coloca o foco no campo de busca da tela atual e seleciona o texto digitado'
   },
   {
     key: ['⌘', 'S'],
     pcKey: ['Ctrl', 'S'],
-    action: 'Save current prompt',
-    description: 'Saves the current prompt if the editor is open'
+    action: 'Salvar o prompt',
+    description: 'Salva o prompt aberto no editor, mesmo com o cursor em um campo'
   },
   {
     key: ['⌘', 'T'],
     pcKey: ['Ctrl', 'T'],
-    action: 'Cycle through themes',
-    description: 'Cycles through all 12 available themes (System, Light, Dark, Matte, Midnight, Ocean, Forest, Cosmic, Sunset, Arctic, Rose, macOS)'
+    action: 'Alternar entre os temas',
+    description: 'Alterna entre os 12 temas disponíveis (Sistema, Claro, Escuro, Preto fosco, Meia-noite, Oceano, Floresta, Roxo cósmico, Pôr do sol, Ártico, Rosa e macOS)'
   },
   {
     key: ['⌘', 'O'],
     pcKey: ['Ctrl', 'O'],
-    action: 'Switch to desktop mode',
-    description: 'Switches from menu bar to desktop mode'
+    action: 'Abrir no modo desktop',
+    description: 'No modo barra de menus, abre o Prompt Studio no modo desktop'
   }
-]
+] as const
+
+// Where the shortcuts work while typing (same rules as the useKeyboardShortcuts calls in App.tsx)
+export function ShortcutsTypingNote() {
+  const mod = isMacPlatform() ? '⌘' : 'Ctrl'
+  return (
+    <>
+      <strong>Enquanto você digita:</strong> {mod}+S, {mod}+F e {mod}+O funcionam em qualquer campo.
+      {' '}{mod}+N e {mod}+T funcionam nos campos de busca, mas ficam desativados nos outros campos
+      (como o título e o conteúdo de um prompt), para não interromper a edição. Em um campo de busca,
+      pressione <Badge variant="outline" className="font-mono text-xs px-1">Esc</Badge> para tirar o foco do campo.
+    </>
+  )
+}
 
 export function KeyboardShortcutsHelp({ open, onOpenChange }: KeyboardShortcutsHelpProps) {
-  const isMac = typeof navigator !== 'undefined' && 
-    navigator.platform.toUpperCase().indexOf('MAC') >= 0
+  const isMac = isMacPlatform()
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Keyboard Shortcuts</DialogTitle>
+          <DialogTitle>Atalhos de teclado</DialogTitle>
+          <DialogDescription>
+            Use estes atalhos de teclado para trabalhar com mais agilidade no Prompt Studio.
+          </DialogDescription>
         </DialogHeader>
-        
+
         <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Use these keyboard shortcuts to work more efficiently with Prompt Studio.
-          </p>
-          
           <div className="space-y-3">
-            {shortcuts.map((shortcut, index) => {
+            {KEYBOARD_SHORTCUTS.map((shortcut, index) => {
               const keys = isMac ? shortcut.key : shortcut.pcKey
-              
+
               return (
                 <div key={index} className="flex items-start justify-between p-3 rounded-lg border bg-card">
                   <div className="flex-1">
@@ -82,9 +95,9 @@ export function KeyboardShortcutsHelp({ open, onOpenChange }: KeyboardShortcutsH
               )
             })}
           </div>
-          
+
           <div className="pt-4 border-t text-xs text-muted-foreground">
-            <p><strong>Note:</strong> Shortcuts work when not typing in input fields. Use <Badge variant="outline" className="font-mono">Esc</Badge> to unfocus inputs if needed.</p>
+            <ShortcutsTypingNote />
           </div>
         </div>
       </DialogContent>

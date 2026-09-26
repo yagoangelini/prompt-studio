@@ -1,12 +1,20 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
-import { parseSearchQuery } from '@/lib/search-parser'
+import {
+  parseSearchQuery,
+  formatSearchQuery,
+  getFreeTextTerms,
+  normalizeSearchText,
+  type SearchQuery
+} from '@/lib/search-parser'
 import { generateSecureHash } from '@/lib/secure-hash'
-import type { 
-  Prompt, 
-  Category, 
-  Template, 
-  CreatePromptData, 
+import { parseDbDate } from '@/lib/utils'
+import { confirmAction } from '@/components/ui/confirm-dialog'
+import type {
+  Prompt,
+  Category,
+  Template,
+  CreatePromptData,
   UpdatePromptData,
   CreateCategoryData,
   UpdateCategoryData,
@@ -48,41 +56,47 @@ interface PromptStore {
   tags: readonly string[]
   loading: boolean
   error: string | null
-  
-  // Filters and search
+
+  // Filters and search. The query is the single source of truth for filtering; categoryId, tags
+  // and isFavorite only mirror it (setSearchFilters ignores them).
   searchFilters: SearchFilters
   sortOptions: SortOptions
-  
+
   // Template filters
   templateSearchQuery: string
-  
+
   // View modes
   promptViewMode: 'list' | 'grid'
   templateViewMode: 'list' | 'grid'
-  
+
   // UI state
   selectedPrompt: Prompt | null
   isPromptEditorOpen: boolean
   isPromptViewerOpen: boolean
   isSettingsOpen: boolean
-  
+  settingsTab: SettingsTab
+  // Main tab of the desktop window, kept in the store so it survives layout remounts
+  activeMainTab: MainTab
+  // True while the prompt or template editor has unsaved changes
+  isEditorDirty: boolean
+
   // Template editor state
   selectedTemplate: Template | null
   isTemplateEditorOpen: boolean
-  
+
   // Toast notifications
   toasts: readonly ToastMessage[]
-  
+
   // Draft persistence
   draftFormData: any
-  
+
   // Recently interacted prompts (IDs in order of interaction)
   recentlyInteractedIds: number[]
-  
+
   // MCP Server
   mcpConfig: McpServerConfig
   exposedPrompts: readonly ExposedPrompt[]
-  
+
   // Actions
   // Data fetching
   fetchPrompts: () => Promise<void>
@@ -90,73 +104,108 @@ interface PromptStore {
   fetchTemplates: () => Promise<void>
   fetchTags: () => Promise<void>
   fetchAllData: () => Promise<void>
-  
+
   // Prompt operations
-  createPrompt: (data: CreatePromptData) => Promise<void>
-  updatePrompt: (id: number, data: UpdatePromptData) => Promise<void>
-  deletePrompt: (id: number) => Promise<void>
-  duplicatePrompt: (id: number) => Promise<void>
-  selectPrompt: (prompt: Prompt | null) => void
-  
+  createPrompt: (data: CreatePromptData) => Promise<boolean>
+  updatePrompt: (id: number, data: UpdatePromptData) => Promise<boolean>
+  deletePrompt: (id: number) => Promise<boolean>
+  duplicatePrompt: (id: number) => Promise<boolean>
+  selectPrompt: (prompt: Prompt | null) => Promise<boolean>
+
   // Category operations
-  createCategory: (data: CreateCategoryData) => Promise<void>
-  updateCategory: (id: number, data: UpdateCategoryData) => Promise<void>
-  deleteCategory: (id: number) => Promise<void>
-  
+  createCategory: (data: CreateCategoryData) => Promise<boolean>
+  updateCategory: (id: number, data: UpdateCategoryData) => Promise<boolean>
+  deleteCategory: (id: number) => Promise<boolean>
+
   // Template operations
-  createTemplate: (data: CreateTemplateData) => Promise<void>
-  updateTemplate: (id: number, data: UpdateTemplateData) => Promise<void>
-  deleteTemplate: (id: number) => Promise<void>
+  createTemplate: (data: CreateTemplateData) => Promise<boolean>
+  updateTemplate: (id: number, data: UpdateTemplateData) => Promise<boolean>
+  deleteTemplate: (id: number) => Promise<boolean>
   selectTemplate: (template: Template | null) => void
-  
+
   // Search and filtering
   setSearchFilters: (filters: Partial<SearchFilters>) => void
+  // Filter shortcuts (sidebar, menu bar): they rewrite the query and close Settings
+  setCategoryFilter: (categoryId: number | null) => void
+  toggleTagFilter: (tag: string) => void
+  toggleFavoriteFilter: () => void
+  clearSearchFilters: () => void
   setSortOptions: (options: Partial<SortOptions>) => void
   getFilteredPrompts: () => readonly Prompt[]
   getRecentlyInteractedPrompts: () => readonly Prompt[]
   searchPrompts: (query: string) => Promise<void>
-  
+
   // Template search
   setTemplateSearchQuery: (query: string) => void
   getFilteredTemplates: () => readonly Template[]
-  
+
   // View modes
   setPromptViewMode: (mode: 'list' | 'grid') => void
   setTemplateViewMode: (mode: 'list' | 'grid') => void
-  
+
   // MCP Server actions
   updateMcpConfig: (config: Partial<McpServerConfig>) => void
   togglePromptExposure: (promptId: number) => void
   setPromptExposure: (promptId: number, exposed: boolean) => void
   getExposedPrompts: () => readonly ExposedPrompt[]
   migrateLegacyEndpoints: () => void
-  
-  // UI actions
-  openPromptEditor: (prompt?: Prompt) => void
+
+  // UI actions. The ones that replace an open editor ask before discarding unsaved changes and
+  // resolve false when the user keeps editing.
+  openPromptEditor: (prompt?: Prompt) => Promise<boolean>
   closePromptEditor: () => void
-  openPromptViewer: (prompt: Prompt) => void
+  openPromptViewer: (prompt: Prompt) => Promise<boolean>
   closePromptViewer: () => void
-  openSettings: () => void
+  openSettings: (tab?: SettingsTab) => Promise<boolean>
+  setSettingsTab: (tab: SettingsTab) => void
+  setActiveMainTab: (tab: MainTab) => void
+  setEditorDirty: (dirty: boolean) => void
+  // Resolves true when there are no unsaved changes or the user chose to discard them
+  confirmDiscardChanges: () => Promise<boolean>
   closeSettings: () => void
-  
+
   // Template editor actions
-  openTemplateEditor: (template?: Template) => void
+  openTemplateEditor: (template?: Template) => Promise<boolean>
   closeTemplateEditor: () => void
-  
+
   // Draft persistence
   saveDraftFormData: (formData: any) => void
   clearDraftFormData: () => void
   getDraftFormData: () => any
-  
+
   // Toast management
   addToast: (toast: Omit<ToastMessage, 'id'>) => void
   removeToast: (id: string) => void
   clearToasts: () => void
-  
+
+  // Factory reset: clears the preferences kept in this browser (localStorage/sessionStorage)
+  // and the matching in-memory state
+  resetLocalState: () => void
+
   // Error handling
   setError: (error: string | null) => void
   clearError: () => void
 }
+
+export type MainTab = 'prompts' | 'templates' | 'testing' | 'mcp'
+export type SettingsTab = 'categories' | 'tags' | 'general' | 'data'
+
+export const SETTINGS_TABS: readonly SettingsTab[] = ['categories', 'tags', 'general', 'data']
+
+// Raw SQLite errors ("SQLITE_BUSY: database is locked") become pt-BR messages; the backend's own
+// pt-BR messages (e.g. "Já existe uma categoria chamada …") pass through unchanged
+export const friendlyErrorMessage = (message: string): string => {
+  if (!/^SQLITE_[A-Z]+/.test(message)) return message
+  if (/^SQLITE_(BUSY|LOCKED)/.test(message)) return 'O banco de dados está ocupado. Aguarde um instante e tente novamente.'
+  if (/^SQLITE_CONSTRAINT/.test(message)) return 'O banco de dados recusou a operação porque ela deixaria os dados inconsistentes.'
+  if (/^SQLITE_(FULL|IOERR)/.test(message)) return 'Não foi possível gravar no disco. Verifique o espaço livre e tente novamente.'
+  if (/^SQLITE_(READONLY|CANTOPEN|PERM)/.test(message)) return 'Não é possível gravar no banco de dados. Verifique as permissões da pasta de dados.'
+  return 'Ocorreu um erro no banco de dados. Tente novamente.'
+}
+
+// "Editar" in the details panel opens the editor; closing it (after saving or canceling) returns to the
+// panel instead of closing the right side entirely
+let editorOpenedFromViewer = false
 
 const generateToastId = (): string => {
   return Math.random().toString(36).substring(2) + Date.now().toString(36)
@@ -169,157 +218,293 @@ const STORAGE_KEYS = {
   DRAFT_FORM_DATA: 'promptStudio_draftFormData',
   PROMPT_VIEW_MODE: 'promptStudio_promptViewMode',
   TEMPLATE_VIEW_MODE: 'promptStudio_templateViewMode',
+  SORT_OPTIONS: 'promptStudio_sortOptions',
   MCP_CONFIG: 'promptStudio_mcpConfig',
-  MCP_EXPOSED_PROMPTS: 'promptStudio_mcpExposedPrompts'
+  MCP_EXPOSED_PROMPTS: 'promptStudio_mcpExposedPrompts',
+  RECENT_PROMPTS: 'recentlyInteractedPrompts'
 }
 
-const getStoredEditorState = () => {
+type StorageKind = 'local' | 'session'
+
+// The editor state and the draft belong to a single window: the desktop window and the menu bar window
+// must not restore each other's editor, so each window has its own keys. They live in localStorage so an
+// unsaved draft survives closing the app.
+const WINDOW_SCOPE = (() => {
   try {
-    const stored = localStorage.getItem(STORAGE_KEYS.EDITOR_STATE)
-    return stored ? JSON.parse(stored) : { isOpen: false }
+    return /menubar/.test(window.location.href) ? 'menubar' : 'desktop'
   } catch {
-    return { isOpen: false }
+    return 'desktop'
+  }
+})()
+const windowKey = (key: string) => `${key}_${WINDOW_SCOPE}`
+
+const getStorage = (kind: StorageKind): Storage => (kind === 'local' ? localStorage : sessionStorage)
+
+const readStored = <T>(kind: StorageKind, key: string, fallback: T): T => {
+  try {
+    const stored = getStorage(kind).getItem(key)
+    return stored ? (JSON.parse(stored) as T) : fallback
+  } catch {
+    return fallback
   }
 }
 
-const getStoredSelectedPrompt = () => {
+const writeStored = (kind: StorageKind, key: string, value: unknown) => {
   try {
-    const stored = localStorage.getItem(STORAGE_KEYS.SELECTED_PROMPT)
-    return stored ? JSON.parse(stored) : null
-  } catch {
-    return null
-  }
-}
-
-const persistEditorState = (isOpen: boolean, selectedPrompt: Prompt | null) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.EDITOR_STATE, JSON.stringify({ isOpen }))
-    localStorage.setItem(STORAGE_KEYS.SELECTED_PROMPT, JSON.stringify(selectedPrompt))
+    getStorage(kind).setItem(key, JSON.stringify(value))
   } catch {
     // Ignore storage errors
   }
+}
+
+const removeStored = (kind: StorageKind, key: string) => {
+  try {
+    getStorage(kind).removeItem(key)
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+// Older versions kept the editor state in localStorage, shared by every window
+removeStored('local', STORAGE_KEYS.EDITOR_STATE)
+removeStored('local', STORAGE_KEYS.SELECTED_PROMPT)
+removeStored('local', STORAGE_KEYS.DRAFT_FORM_DATA)
+
+const getStoredEditorState = (): { isOpen: boolean } =>
+  readStored('local', windowKey(STORAGE_KEYS.EDITOR_STATE), { isOpen: false })
+
+const getStoredSelectedPrompt = (): Prompt | null =>
+  readStored<Prompt | null>('local', windowKey(STORAGE_KEYS.SELECTED_PROMPT), null)
+
+const persistEditorState = (isOpen: boolean, selectedPrompt: Prompt | null) => {
+  writeStored('local', windowKey(STORAGE_KEYS.EDITOR_STATE), { isOpen })
+  writeStored('local', windowKey(STORAGE_KEYS.SELECTED_PROMPT), selectedPrompt)
 }
 
 const clearPersistedEditorState = () => {
-  try {
-    localStorage.removeItem(STORAGE_KEYS.EDITOR_STATE)
-    localStorage.removeItem(STORAGE_KEYS.SELECTED_PROMPT)
-    localStorage.removeItem(STORAGE_KEYS.DRAFT_FORM_DATA)
-  } catch {
-    // Ignore storage errors
-  }
+  removeStored('local', windowKey(STORAGE_KEYS.EDITOR_STATE))
+  removeStored('local', windowKey(STORAGE_KEYS.SELECTED_PROMPT))
+  removeStored('local', windowKey(STORAGE_KEYS.DRAFT_FORM_DATA))
 }
 
 const persistDraftFormData = (formData: any) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.DRAFT_FORM_DATA, JSON.stringify(formData))
-  } catch {
-    // Ignore storage errors
-  }
+  writeStored('local', windowKey(STORAGE_KEYS.DRAFT_FORM_DATA), formData)
 }
 
-const getStoredDraftFormData = () => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.DRAFT_FORM_DATA)
-    return stored ? JSON.parse(stored) : null
-  } catch {
-    return null
-  }
-}
+const getStoredDraftFormData = () => readStored<any>('local', windowKey(STORAGE_KEYS.DRAFT_FORM_DATA), null)
 
-const getStoredViewMode = (key: string, defaultMode: 'list' | 'grid' = 'list') => {
-  try {
-    const stored = localStorage.getItem(key)
-    return stored ? JSON.parse(stored) : defaultMode
-  } catch {
-    return defaultMode
-  }
+const getStoredViewMode = (key: string, defaultMode: 'list' | 'grid' = 'list'): 'list' | 'grid' => {
+  const stored = readStored<unknown>('local', key, defaultMode)
+  return stored === 'list' || stored === 'grid' ? stored : defaultMode
 }
 
 const persistViewMode = (key: string, mode: 'list' | 'grid') => {
-  try {
-    localStorage.setItem(key, JSON.stringify(mode))
-  } catch {
-    // Ignore storage errors
+  writeStored('local', key, mode)
+}
+
+const DEFAULT_SORT_OPTIONS: SortOptions = { field: 'updated_at', direction: 'desc' }
+
+const getStoredSortOptions = (): SortOptions => {
+  const stored = readStored<Partial<SortOptions> | null>('local', STORAGE_KEYS.SORT_OPTIONS, null)
+  const field = stored?.field
+  const direction = stored?.direction
+  if ((field === 'updated_at' || field === 'created_at' || field === 'title') &&
+      (direction === 'asc' || direction === 'desc')) {
+    return { field, direction }
   }
+  return DEFAULT_SORT_OPTIONS
 }
 
 // MCP persistence helpers
-const getStoredMcpConfig = (): McpServerConfig => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.MCP_CONFIG)
-    return stored ? JSON.parse(stored) : {
-      name: 'Prompt Studio MCP Server',
-      description: 'Exposes prompt library as MCP tools and resources',
-      port: 3000,
-      host: '0.0.0.0',
-      enableAuth: true,
-      apiKey: '',
-      maxConnections: 100,
-      rateLimit: 60,
-      enableCors: true,
-      allowedOrigins: ['*'],
-      enableLogging: true,
-      logLevel: 'info' as const
-    }
-  } catch {
-    return {
-      name: 'Prompt Studio MCP Server',
-      description: 'Exposes prompt library as MCP tools and resources',
-      port: 3000,
-      host: '0.0.0.0',
-      enableAuth: true,
-      apiKey: '',
-      maxConnections: 100,
-      rateLimit: 60,
-      enableCors: true,
-      allowedOrigins: ['*'],
-      enableLogging: true,
-      logLevel: 'info' as const
-    }
-  }
+const DEFAULT_MCP_CONFIG: McpServerConfig = {
+  name: 'Servidor MCP do Prompt Studio',
+  description: 'Expõe a biblioteca de prompts como ferramentas e recursos MCP',
+  port: 3000,
+  host: '127.0.0.1',
+  enableAuth: true,
+  apiKey: '',
+  maxConnections: 100,
+  rateLimit: 60,
+  enableCors: true,
+  allowedOrigins: ['*'],
+  enableLogging: true,
+  logLevel: 'info'
 }
 
+const getStoredMcpConfig = (): McpServerConfig =>
+  readStored('local', STORAGE_KEYS.MCP_CONFIG, { ...DEFAULT_MCP_CONFIG, allowedOrigins: ['*'] })
+
 const getStoredExposedPrompts = (): ExposedPrompt[] => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEYS.MCP_EXPOSED_PROMPTS)
-    return stored ? JSON.parse(stored) : []
-  } catch {
-    return []
-  }
+  const stored = readStored<unknown>('local', STORAGE_KEYS.MCP_EXPOSED_PROMPTS, [])
+  return Array.isArray(stored) ? stored : []
 }
 
 const persistMcpConfig = (config: McpServerConfig) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.MCP_CONFIG, JSON.stringify(config))
-  } catch {
-    // Ignore storage errors
-  }
+  writeStored('local', STORAGE_KEYS.MCP_CONFIG, config)
 }
 
-const persistExposedPrompts = (exposedPrompts: ExposedPrompt[]) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.MCP_EXPOSED_PROMPTS, JSON.stringify(exposedPrompts))
-  } catch {
-    // Ignore storage errors
-  }
+const persistExposedPrompts = (exposedPrompts: readonly ExposedPrompt[]) => {
+  writeStored('local', STORAGE_KEYS.MCP_EXPOSED_PROMPTS, exposedPrompts)
 }
 
 // Track recently interacted prompts
 const MAX_RECENT_ITEMS = 10
-const trackInteraction = (promptId: number, currentIds: number[]): number[] => {
-  // Remove the ID if it already exists
-  const filtered = currentIds.filter(id => id !== promptId)
-  // Add to the beginning
-  const updated = [promptId, ...filtered].slice(0, MAX_RECENT_ITEMS)
-  // Persist to localStorage
-  localStorage.setItem('recentlyInteractedPrompts', JSON.stringify(updated))
+
+const getStoredRecentIds = (): number[] => {
+  const stored = readStored<unknown>('local', STORAGE_KEYS.RECENT_PROMPTS, [])
+  return Array.isArray(stored) ? stored.filter((id): id is number => typeof id === 'number') : []
+}
+
+const persistRecentIds = (ids: readonly number[]) => {
+  writeStored('local', STORAGE_KEYS.RECENT_PROMPTS, ids)
+}
+
+const trackInteraction = (promptId: number, currentIds: readonly number[]): number[] => {
+  // Move the ID to the beginning
+  const updated = [promptId, ...currentIds.filter(id => id !== promptId)].slice(0, MAX_RECENT_ITEMS)
+  persistRecentIds(updated)
   return updated
 }
 
+// Names are listed in pt-BR alphabetical order, ignoring case and accents
+const nameCollator = new Intl.Collator('pt-BR', { sensitivity: 'base' })
+
+const sortByName = <T>(items: readonly T[], getName: (item: T) => string): T[] =>
+  [...items].sort((a, b) => nameCollator.compare(getName(a), getName(b)))
+
+const MAX_TITLE_LENGTH = 200
+const COPY_SUFFIX_REGEX = / \(cópia(?: \d+)?\)$/
+
+// "Título" -> "Título (cópia)", then "Título (cópia 2)", "Título (cópia 3)"... (never an existing title)
+const buildCopyTitle = (title: string, existingTitles: readonly string[]): string => {
+  const base = title.replace(COPY_SUFFIX_REGEX, '')
+  const taken = new Set(existingTitles.map(t => t.trim().toLocaleLowerCase('pt-BR')))
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? ' (cópia)' : ` (cópia ${n})`
+    const candidate = `${base.slice(0, MAX_TITLE_LENGTH - suffix.length).trimEnd()}${suffix}`
+    if (!taken.has(candidate.toLocaleLowerCase('pt-BR'))) {
+      return candidate
+    }
+  }
+}
+
+/**
+ * Categories selected by a "categoria:" value: the ones named exactly like the value (ignoring case
+ * and accents) or, when there is none, every category whose name contains the value.
+ */
+export function resolveCategoryIds(value: string, categories: readonly Category[]): Set<number> {
+  const wanted = normalizeSearchText(value)
+  if (!wanted) return new Set()
+  const exact = categories.filter(c => normalizeSearchText(c.name) === wanted)
+  const matches = exact.length > 0
+    ? exact
+    : categories.filter(c => normalizeSearchText(c.name).includes(wanted))
+  return new Set(matches.map(c => c.id))
+}
+
+// Builds the search filters from the query; the other fields only mirror it
+const deriveSearchFilters = (query: string, categories: readonly Category[]): SearchFilters => {
+  const parsed = parseSearchQuery(query)
+  const categoryIds = parsed.category ? [...resolveCategoryIds(parsed.category, categories)] : []
+  return {
+    query,
+    categoryId: categoryIds.length === 1 ? (categoryIds[0] ?? null) : null,
+    tags: parsed.tags,
+    isFavorite: parsed.isFavorite
+  }
+}
+
+// Normalized texts of each prompt, cached per object (prompts are replaced, never mutated, on change)
+interface SearchableText {
+  title: string
+  content: string
+  all: string
+}
+
+const searchableTextCache = new WeakMap<Prompt, SearchableText>()
+
+const getSearchableText = (prompt: Prompt): SearchableText => {
+  let text = searchableTextCache.get(prompt)
+  if (!text) {
+    const title = normalizeSearchText(prompt.title)
+    const content = normalizeSearchText(prompt.content)
+    const description = normalizeSearchText(prompt.description ?? '')
+    text = { title, content, all: `${title}\n${description}\n${content}` }
+    searchableTextCache.set(prompt, text)
+  }
+  return text
+}
+
+const toTimestamp = (value: string): number => parseDbDate(value).getTime() || 0
+
 export const usePromptStore = create<PromptStore>()(
   devtools(
-    (set, get) => ({
+    (set, get) => {
+      const setQuery = (query: string, extra: Partial<PromptStore> = {}) => {
+        set({ searchFilters: deriveSearchFilters(query, get().categories), ...extra })
+      }
+
+      // Rewrites the query through its parsed form (used by the filter shortcuts)
+      const updateParsedQuery = (change: (parsed: SearchQuery) => void, extra: Partial<PromptStore> = {}) => {
+        const parsed = parseSearchQuery(get().searchFilters.query)
+        change(parsed)
+        setQuery(formatSearchQuery(parsed), extra)
+      }
+
+      const clearDraft = () => {
+        set({ draftFormData: null })
+        removeStored('local', windowKey(STORAGE_KEYS.DRAFT_FORM_DATA))
+      }
+
+      const confirmDiscardChanges = async (): Promise<boolean> => {
+        if (!get().isEditorDirty) return true
+        const confirmed = await confirmAction({
+          title: 'Descartar alterações?',
+          description: 'Você tem alterações não salvas. Deseja descartá-las?',
+          confirmLabel: 'Descartar',
+          destructive: true
+        })
+        if (!confirmed) return false
+        const { isPromptEditorOpen, selectedPrompt } = get()
+        // Discarding a new prompt also discards its saved draft
+        if (isPromptEditorOpen && !selectedPrompt) {
+          clearDraft()
+        }
+        set({ isEditorDirty: false })
+        return true
+      }
+
+      // Removes the prompt from the MCP exposure list and, if the server is running, updates it
+      const removePromptExposure = async (promptId: number) => {
+        const { exposedPrompts } = get()
+        const removed = exposedPrompts.find(p => p.id === promptId)
+        if (!removed) return
+        const updated = exposedPrompts.filter(p => p.id !== promptId)
+        set({ exposedPrompts: updated })
+        persistExposedPrompts(updated)
+        if (!removed.exposed) return
+        try {
+          const status = await window.electronAPI.getMcpServerStatus()
+          if (status.running) {
+            await window.electronAPI.updateMcpServerExposedPrompts(updated.filter(p => p.exposed))
+          }
+        } catch (error) {
+          console.error('Failed to update the MCP server exposed prompts:', error)
+        }
+      }
+
+      const showError = (error: unknown, fallback: string) => {
+        if (error instanceof Error && error.message.startsWith('SQLITE_')) console.error(error)
+        const errorMessage = error instanceof Error ? friendlyErrorMessage(error.message) : fallback
+        set({ error: errorMessage, loading: false })
+        get().addToast({
+          type: 'error',
+          title: 'Erro',
+          description: errorMessage
+        })
+      }
+
+      return {
       // Initial state
       prompts: [],
       categories: [],
@@ -327,36 +512,31 @@ export const usePromptStore = create<PromptStore>()(
       tags: [],
       loading: false,
       error: null,
-      
-      searchFilters: {
-        query: '',
-        categoryId: null,
-        tags: [],
-        isFavorite: undefined
-      },
-      
-      sortOptions: {
-        field: 'updated_at',
-        direction: 'desc'
-      },
-      
+
+      searchFilters: deriveSearchFilters('', []),
+
+      sortOptions: getStoredSortOptions(),
+
       templateSearchQuery: '',
-      
+
       promptViewMode: getStoredViewMode(STORAGE_KEYS.PROMPT_VIEW_MODE, 'list'),
       templateViewMode: getStoredViewMode(STORAGE_KEYS.TEMPLATE_VIEW_MODE, 'list'),
-      
+
       selectedPrompt: getStoredSelectedPrompt(),
-      isPromptEditorOpen: getStoredEditorState().isOpen,
+      isPromptEditorOpen: getStoredEditorState().isOpen === true,
       isPromptViewerOpen: false,
       isSettingsOpen: false,
-      
+      settingsTab: 'categories',
+      activeMainTab: 'prompts',
+      isEditorDirty: false,
+
       selectedTemplate: null,
       isTemplateEditorOpen: false,
-      
+
       toasts: [],
       draftFormData: getStoredDraftFormData(),
-      recentlyInteractedIds: JSON.parse(localStorage.getItem('recentlyInteractedPrompts') || '[]'),
-      
+      recentlyInteractedIds: getStoredRecentIds(),
+
       // MCP Server state
       mcpConfig: getStoredMcpConfig(),
       exposedPrompts: getStoredExposedPrompts(),
@@ -368,25 +548,19 @@ export const usePromptStore = create<PromptStore>()(
           const prompts = await window.electronAPI.getAllPrompts()
           set({ prompts, loading: false })
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to fetch prompts'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível carregar os prompts')
         }
       },
 
       fetchCategories: async () => {
         try {
-          const categories = await window.electronAPI.getAllCategories()
-          set({ categories })
+          const categories = sortByName(await window.electronAPI.getAllCategories(), c => c.name)
+          set({ categories, searchFilters: deriveSearchFilters(get().searchFilters.query, categories) })
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to fetch categories'
+          const errorMessage = error instanceof Error ? error.message : 'Não foi possível carregar as categorias'
           get().addToast({
             type: 'error',
-            title: 'Error',
+            title: 'Erro',
             description: errorMessage
           })
         }
@@ -395,12 +569,12 @@ export const usePromptStore = create<PromptStore>()(
       fetchTemplates: async () => {
         try {
           const templates = await window.electronAPI.getAllTemplates()
-          set({ templates })
+          set({ templates: sortByName(templates, t => t.name) })
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to fetch templates'
+          const errorMessage = error instanceof Error ? error.message : 'Não foi possível carregar os templates'
           get().addToast({
             type: 'error',
-            title: 'Error',
+            title: 'Erro',
             description: errorMessage
           })
         }
@@ -409,12 +583,12 @@ export const usePromptStore = create<PromptStore>()(
       fetchTags: async () => {
         try {
           const tags = await window.electronAPI.getAllTags()
-          set({ tags })
+          set({ tags: sortByName(tags, tag => tag) })
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to fetch tags'
+          const errorMessage = error instanceof Error ? error.message : 'Não foi possível carregar as tags'
           get().addToast({
             type: 'error',
-            title: 'Error',
+            title: 'Erro',
             description: errorMessage
           })
         }
@@ -435,25 +609,23 @@ export const usePromptStore = create<PromptStore>()(
           set({ loading: true, error: null })
           const newPrompt = await window.electronAPI.createPrompt(data)
           const { prompts } = get()
-          set({ 
+          set({
             prompts: [newPrompt, ...prompts],
-            loading: false 
+            draftFormData: null,
+            loading: false
           })
           // Clear editor persistence after successful save
           clearPersistedEditorState()
+          await get().fetchTags()
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Prompt created successfully'
+            title: 'Sucesso',
+            description: 'Prompt criado com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to create prompt'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível criar o prompt')
+          return false
         }
       },
 
@@ -461,33 +633,40 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           const updatedPrompt = await window.electronAPI.updatePrompt(id, data)
-          const { prompts, recentlyInteractedIds } = get()
-          const updatedPrompts = prompts.map(p => p.id === id ? updatedPrompt : p)
-          
-          // Track interaction (edit or favorite)
-          const updatedRecentIds = trackInteraction(id, recentlyInteractedIds)
-          
-          set({ 
-            prompts: updatedPrompts,
-            selectedPrompt: updatedPrompt,
+          const { prompts, recentlyInteractedIds, selectedPrompt, isPromptEditorOpen } = get()
+          const isSelected = selectedPrompt?.id === id
+
+          set({
+            prompts: prompts.map(p => p.id === id ? updatedPrompt : p),
+            // Another prompt may be open in the viewer or editor: only replace the updated one
+            selectedPrompt: isSelected ? updatedPrompt : selectedPrompt,
             loading: false,
-            recentlyInteractedIds: updatedRecentIds
+            // Track interaction (edit or favorite)
+            recentlyInteractedIds: trackInteraction(id, recentlyInteractedIds)
           })
-          // Clear editor persistence after successful save
-          clearPersistedEditorState()
-          get().addToast({
-            type: 'success',
-            title: 'Success',
-            description: 'Prompt updated successfully'
-          })
+          // The saved prompt no longer needs to be restored in the editor
+          if (isSelected && isPromptEditorOpen) {
+            clearPersistedEditorState()
+          }
+          await get().fetchTags()
+          // Toggling the favorite says what happened instead of the generic message
+          const onlyFavorite = Object.keys(data).length === 1 && data.is_favorite !== undefined
+          get().addToast(onlyFavorite
+            ? {
+                type: 'success',
+                title: data.is_favorite ? 'Adicionado aos favoritos' : 'Removido dos favoritos',
+                description: `"${updatedPrompt.title}"`,
+                duration: 2500
+              }
+            : {
+                type: 'success',
+                title: 'Sucesso',
+                description: 'Prompt atualizado com sucesso'
+              })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to update prompt'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível atualizar o prompt')
+          return false
         }
       },
 
@@ -495,42 +674,47 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           await window.electronAPI.deletePrompt(id)
-          const { prompts } = get()
-          const filteredPrompts = prompts.filter(p => p.id !== id)
-          set({ 
-            prompts: filteredPrompts,
-            selectedPrompt: null,
-            loading: false 
+          const { prompts, selectedPrompt, recentlyInteractedIds, isPromptEditorOpen } = get()
+          const wasSelected = selectedPrompt?.id === id
+          const recentIds = recentlyInteractedIds.filter(recentId => recentId !== id)
+          persistRecentIds(recentIds)
+          set({
+            prompts: prompts.filter(p => p.id !== id),
+            recentlyInteractedIds: recentIds,
+            loading: false,
+            // The viewer or editor showing the deleted prompt is closed
+            ...(wasSelected
+              ? { selectedPrompt: null, isPromptViewerOpen: false, isPromptEditorOpen: false, isEditorDirty: false }
+              : {})
           })
+          if (wasSelected && isPromptEditorOpen) {
+            clearPersistedEditorState()
+          }
+          await removePromptExposure(id)
+          await get().fetchTags()
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Prompt deleted successfully'
+            title: 'Sucesso',
+            description: 'Prompt excluído com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to delete prompt'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível excluir o prompt')
+          return false
         }
       },
 
       duplicatePrompt: async (id: number) => {
         try {
           set({ loading: true, error: null })
-          const { prompts } = get()
-          const originalPrompt = prompts.find(p => p.id === id)
-          
+          const originalPrompt = get().prompts.find(p => p.id === id)
+
           if (!originalPrompt) {
-            throw new Error('Prompt not found')
+            throw new Error('Prompt não encontrado')
           }
 
-          // Create duplicate data with "(Copy)" suffix
           const duplicateData: CreatePromptData = {
-            title: `${originalPrompt.title} (Copy)`,
+            title: buildCopyTitle(originalPrompt.title, get().prompts.map(p => p.title)),
             content: originalPrompt.content,
             description: originalPrompt.description || '',
             category_id: originalPrompt.category_id,
@@ -540,29 +724,32 @@ export const usePromptStore = create<PromptStore>()(
           }
 
           const newPrompt = await window.electronAPI.createPrompt(duplicateData)
-          set({ 
+          const { prompts, recentlyInteractedIds } = get()
+          set({
             prompts: [newPrompt, ...prompts],
-            loading: false 
+            recentlyInteractedIds: trackInteraction(newPrompt.id, recentlyInteractedIds),
+            loading: false
           })
-          
+          await get().fetchTags()
+
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Prompt duplicated successfully'
+            title: 'Sucesso',
+            description: 'Prompt duplicado com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to duplicate prompt'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível duplicar o prompt')
+          return false
         }
       },
 
-      selectPrompt: (prompt: Prompt | null) => {
+      selectPrompt: async (prompt: Prompt | null) => {
+        const { selectedPrompt, isPromptEditorOpen } = get()
+        const switching = isPromptEditorOpen && (selectedPrompt?.id ?? null) !== (prompt?.id ?? null)
+        if (switching && !(await confirmDiscardChanges())) return false
         set({ selectedPrompt: prompt })
+        return true
       },
 
       selectTemplate: (template: Template | null) => {
@@ -574,24 +761,21 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           const newCategory = await window.electronAPI.createCategory(data)
-          const { categories } = get()
-          set({ 
-            categories: [...categories, newCategory],
-            loading: false 
+          const categories = sortByName([...get().categories, newCategory], c => c.name)
+          set({
+            categories,
+            searchFilters: deriveSearchFilters(get().searchFilters.query, categories),
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Category created successfully'
+            title: 'Sucesso',
+            description: 'Categoria criada com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to create category'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível criar a categoria')
+          return false
         }
       },
 
@@ -599,25 +783,41 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           const updatedCategory = await window.electronAPI.updateCategory(id, data)
-          const { categories } = get()
-          const updatedCategories = categories.map(c => c.id === id ? updatedCategory : c)
-          set({ 
+          const { categories, prompts, templates, selectedPrompt, selectedTemplate, searchFilters } = get()
+          const previous = categories.find(c => c.id === id)
+          const updatedCategories = sortByName(categories.map(c => c.id === id ? updatedCategory : c), c => c.name)
+          // Prompts and templates show the category name and color: keep them in sync
+          const relabel = <T extends Prompt | Template>(item: T): T =>
+            item.category_id === id
+              ? { ...item, category_name: updatedCategory.name, category_color: updatedCategory.color }
+              : item
+          // A filter on the old name follows the renamed category
+          let query = searchFilters.query
+          if (previous && previous.name !== updatedCategory.name) {
+            const parsed = parseSearchQuery(query)
+            if (parsed.category && normalizeSearchText(parsed.category) === normalizeSearchText(previous.name)) {
+              parsed.category = updatedCategory.name
+              query = formatSearchQuery(parsed)
+            }
+          }
+          set({
             categories: updatedCategories,
-            loading: false 
+            prompts: prompts.map(relabel),
+            templates: templates.map(relabel),
+            selectedPrompt: selectedPrompt && relabel(selectedPrompt),
+            selectedTemplate: selectedTemplate && relabel(selectedTemplate),
+            searchFilters: deriveSearchFilters(query, updatedCategories),
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Category updated successfully'
+            title: 'Sucesso',
+            description: 'Categoria atualizada com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to update category'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível atualizar a categoria')
+          return false
         }
       },
 
@@ -625,25 +825,43 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           await window.electronAPI.deleteCategory(id)
-          const { categories } = get()
+          const { categories, prompts, templates, selectedPrompt, selectedTemplate, searchFilters } = get()
+          const deletedCategory = categories.find(c => c.id === id)
           const filteredCategories = categories.filter(c => c.id !== id)
-          set({ 
+          // Mirror the database: prompts and templates of the deleted category become uncategorized
+          const uncategorize = <T extends Prompt | Template>(item: T): T =>
+            item.category_id === id
+              ? { ...item, category_id: null, category_name: undefined, category_color: undefined }
+              : item
+          // A filter on the deleted category is removed from the query
+          let query = searchFilters.query
+          const parsed = parseSearchQuery(query)
+          if (parsed.category && resolveCategoryIds(parsed.category, categories).has(id)) {
+            const filteredByName = deletedCategory &&
+              normalizeSearchText(parsed.category) === normalizeSearchText(deletedCategory.name)
+            if (filteredByName || resolveCategoryIds(parsed.category, filteredCategories).size === 0) {
+              parsed.category = ''
+              query = formatSearchQuery(parsed)
+            }
+          }
+          set({
             categories: filteredCategories,
-            loading: false 
+            prompts: prompts.map(uncategorize),
+            templates: templates.map(uncategorize),
+            selectedPrompt: selectedPrompt && uncategorize(selectedPrompt),
+            selectedTemplate: selectedTemplate && uncategorize(selectedTemplate),
+            searchFilters: deriveSearchFilters(query, filteredCategories),
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Category deleted successfully'
+            title: 'Sucesso',
+            description: 'Categoria excluída com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to delete category'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível excluir a categoria')
+          return false
         }
       },
 
@@ -652,24 +870,19 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           const newTemplate = await window.electronAPI.createTemplate(data)
-          const { templates } = get()
-          set({ 
-            templates: [...templates, newTemplate],
-            loading: false 
+          set({
+            templates: sortByName([...get().templates, newTemplate], t => t.name),
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Template created successfully'
+            title: 'Sucesso',
+            description: 'Template criado com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to create template'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível criar o template')
+          return false
         }
       },
 
@@ -677,25 +890,26 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           const updatedTemplate = await window.electronAPI.updateTemplate(id, data)
-          const { templates } = get()
-          const updatedTemplates = templates.map(t => t.id === id ? updatedTemplate : t)
-          set({ 
-            templates: updatedTemplates,
-            loading: false 
+          const { templates, prompts, selectedPrompt, selectedTemplate } = get()
+          // Prompts show the name of their template: keep it in sync
+          const relabel = (prompt: Prompt): Prompt =>
+            prompt.template_id === id ? { ...prompt, template_name: updatedTemplate.name } : prompt
+          set({
+            templates: sortByName(templates.map(t => t.id === id ? updatedTemplate : t), t => t.name),
+            prompts: prompts.map(relabel),
+            selectedPrompt: selectedPrompt && relabel(selectedPrompt),
+            selectedTemplate: selectedTemplate?.id === id ? updatedTemplate : selectedTemplate,
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Template updated successfully'
+            title: 'Sucesso',
+            description: 'Template atualizado com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to update template'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível atualizar o template')
+          return false
         }
       },
 
@@ -703,150 +917,131 @@ export const usePromptStore = create<PromptStore>()(
         try {
           set({ loading: true, error: null })
           await window.electronAPI.deleteTemplate(id)
-          const { templates } = get()
-          const filteredTemplates = templates.filter(t => t.id !== id)
-          set({ 
-            templates: filteredTemplates,
-            loading: false 
+          const { templates, prompts, selectedPrompt, selectedTemplate } = get()
+          // Mirror the database: prompts created from the deleted template lose the link
+          const detach = (prompt: Prompt): Prompt =>
+            prompt.template_id === id ? { ...prompt, template_id: null, template_name: undefined } : prompt
+          set({
+            templates: templates.filter(t => t.id !== id),
+            prompts: prompts.map(detach),
+            selectedPrompt: selectedPrompt && detach(selectedPrompt),
+            // The editor of the deleted template is closed
+            ...(selectedTemplate?.id === id
+              ? { selectedTemplate: null, isTemplateEditorOpen: false, isEditorDirty: false }
+              : {}),
+            loading: false
           })
           get().addToast({
             type: 'success',
-            title: 'Success',
-            description: 'Template deleted successfully'
+            title: 'Sucesso',
+            description: 'Template excluído com sucesso'
           })
+          return true
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Failed to delete template'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível excluir o template')
+          return false
         }
       },
 
       // Search and filtering
       setSearchFilters: (filters: Partial<SearchFilters>) => {
-        const currentFilters = get().searchFilters
-        set({ searchFilters: { ...currentFilters, ...filters } })
+        // Only the query is taken: categoryId/tags/isFavorite are derived from it
+        setQuery(filters.query ?? get().searchFilters.query)
+      },
+
+      setCategoryFilter: (categoryId: number | null) => {
+        const categoryName = categoryId === null
+          ? ''
+          : get().categories.find(c => c.id === categoryId)?.name ?? ''
+        updateParsedQuery(parsed => { parsed.category = categoryName }, { isSettingsOpen: false })
+      },
+
+      toggleTagFilter: (tag: string) => {
+        const wanted = normalizeSearchText(tag)
+        updateParsedQuery(parsed => {
+          const active = parsed.tags.some(t => normalizeSearchText(t) === wanted)
+          parsed.tags = active
+            ? parsed.tags.filter(t => normalizeSearchText(t) !== wanted)
+            : [...parsed.tags, tag]
+        }, { isSettingsOpen: false })
+      },
+
+      toggleFavoriteFilter: () => {
+        updateParsedQuery(parsed => {
+          parsed.isFavorite = parsed.isFavorite === true ? undefined : true
+        }, { isSettingsOpen: false })
+      },
+
+      clearSearchFilters: () => {
+        setQuery('')
       },
 
       setSortOptions: (options: Partial<SortOptions>) => {
-        const currentOptions = get().sortOptions
-        set({ sortOptions: { ...currentOptions, ...options } })
+        const sortOptions = { ...get().sortOptions, ...options }
+        set({ sortOptions })
+        writeStored('local', STORAGE_KEYS.SORT_OPTIONS, sortOptions)
       },
 
       getFilteredPrompts: () => {
         const { prompts, categories, searchFilters, sortOptions } = get()
+        const parsedQuery = parseSearchQuery(searchFilters.query)
         let filtered = [...prompts]
 
-        // Apply advanced search query
-        if (searchFilters.query) {
-          const parsedQuery = parseSearchQuery(searchFilters.query)
-          
-          // Apply general text search
-          if (parsedQuery.generalQuery) {
-            const generalQuery = parsedQuery.generalQuery.toLowerCase()
-            filtered = filtered.filter(prompt => 
-              prompt.title.toLowerCase().includes(generalQuery) ||
-              prompt.content.toLowerCase().includes(generalQuery) ||
-              prompt.description?.toLowerCase().includes(generalQuery)
-            )
-          }
-          
-          // Apply title-specific search
-          if (parsedQuery.title) {
-            const titleQuery = parsedQuery.title.toLowerCase()
-            filtered = filtered.filter(prompt => 
-              prompt.title.toLowerCase().includes(titleQuery)
-            )
-          }
-          
-          // Apply content-specific search
-          if (parsedQuery.content) {
-            const contentQuery = parsedQuery.content.toLowerCase()
-            filtered = filtered.filter(prompt => 
-              prompt.content.toLowerCase().includes(contentQuery)
-            )
-          }
-          
-          // Apply category search
-          if (parsedQuery.category) {
-            const categoryQuery = parsedQuery.category.toLowerCase()
-            const matchingCategory = categories.find(cat => 
-              cat.name.toLowerCase().includes(categoryQuery)
-            )
-            if (matchingCategory) {
-              filtered = filtered.filter(prompt => prompt.category_id === matchingCategory.id)
-            } else {
-              // No matching category found, return empty results
-              filtered = []
-            }
-          }
-          
-          // Apply tag search
-          if (parsedQuery.tags.length > 0) {
-            filtered = filtered.filter(prompt =>
-              parsedQuery.tags.some(tag => 
-                prompt.tags.some(promptTag => 
-                  promptTag.toLowerCase().includes(tag.toLowerCase())
-                )
-              )
-            )
-          }
-          
-          // Apply favorite filter from parsed query
-          if (parsedQuery.isFavorite !== undefined) {
-            filtered = filtered.filter(prompt => prompt.is_favorite === parsedQuery.isFavorite)
-          }
+        // Free text: every word (or "quoted phrase") must appear in the title, description or content,
+        // ignoring case and accents
+        const terms = getFreeTextTerms(parsedQuery.generalQuery)
+        if (terms.length > 0) {
+          filtered = filtered.filter(prompt => {
+            const { all } = getSearchableText(prompt)
+            return terms.every(term => all.includes(term))
+          })
         }
 
-        // Apply category filter
-        if (searchFilters.categoryId) {
-          filtered = filtered.filter(prompt => prompt.category_id === searchFilters.categoryId)
+        const titleQuery = normalizeSearchText(parsedQuery.title)
+        if (titleQuery) {
+          filtered = filtered.filter(prompt => getSearchableText(prompt).title.includes(titleQuery))
         }
 
-        // Apply tags filter
-        if (searchFilters.tags && searchFilters.tags.length > 0) {
+        const contentQuery = normalizeSearchText(parsedQuery.content)
+        if (contentQuery) {
+          filtered = filtered.filter(prompt => getSearchableText(prompt).content.includes(contentQuery))
+        }
+
+        // Category: exact name, or every category containing the value (none -> no results)
+        if (parsedQuery.category) {
+          const categoryIds = resolveCategoryIds(parsedQuery.category, categories)
+          filtered = filtered.filter(prompt => prompt.category_id !== null && categoryIds.has(prompt.category_id))
+        }
+
+        // Tags: a prompt matches when it has any of the tags (same name, ignoring case and accents)
+        if (parsedQuery.tags.length > 0) {
+          const wantedTags = new Set(parsedQuery.tags.map(normalizeSearchText))
           filtered = filtered.filter(prompt =>
-            searchFilters.tags!.some(tag => prompt.tags.includes(tag))
+            prompt.tags.some(tag => wantedTags.has(normalizeSearchText(tag)))
           )
         }
 
-        // Apply favorite filter
-        if (searchFilters.isFavorite !== undefined) {
-          filtered = filtered.filter(prompt => prompt.is_favorite === searchFilters.isFavorite)
+        if (parsedQuery.isFavorite !== undefined) {
+          filtered = filtered.filter(prompt => prompt.is_favorite === parsedQuery.isFavorite)
         }
 
         // Apply sorting
+        const { field, direction } = sortOptions
+        const factor = direction === 'asc' ? 1 : -1
         filtered.sort((a, b) => {
-          const { field, direction } = sortOptions
-          let aValue: string | number = a[field]
-          let bValue: string | number = b[field]
-
-          if (field === 'title') {
-            aValue = aValue.toLowerCase()
-            bValue = bValue.toLowerCase()
-          } else {
-            // For dates, convert to timestamp for comparison
-            aValue = new Date(aValue as string).getTime()
-            bValue = new Date(bValue as string).getTime()
-          }
-
-          if (direction === 'asc') {
-            return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-          } else {
-            return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
-          }
+          const result = field === 'title'
+            ? nameCollator.compare(a.title, b.title)
+            : toTimestamp(a[field]) - toTimestamp(b[field])
+          return result * factor
         })
 
         return filtered as readonly Prompt[]
       },
-      
+
       getRecentlyInteractedPrompts: () => {
         const { prompts, recentlyInteractedIds } = get()
         const recentPrompts: Prompt[] = []
-        
+
         // Get prompts in the order of recent interaction
         for (const id of recentlyInteractedIds) {
           const prompt = prompts.find(p => p.id === id)
@@ -854,7 +1049,7 @@ export const usePromptStore = create<PromptStore>()(
             recentPrompts.push(prompt)
           }
         }
-        
+
         return recentPrompts as readonly Prompt[]
       },
 
@@ -864,95 +1059,142 @@ export const usePromptStore = create<PromptStore>()(
           const prompts = await window.electronAPI.searchPrompts(query)
           set({ prompts, loading: false })
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Search failed'
-          set({ error: errorMessage, loading: false })
-          get().addToast({
-            type: 'error',
-            title: 'Error',
-            description: errorMessage
-          })
+          showError(error, 'Não foi possível realizar a busca')
         }
       },
 
       // UI actions
-      openPromptEditor: (prompt?: Prompt) => {
-        const selectedPrompt = prompt || null
-        const { recentlyInteractedIds } = get()
-        
-        // Track interaction if editing existing prompt
-        const updatedRecentIds = selectedPrompt 
-          ? trackInteraction(selectedPrompt.id, recentlyInteractedIds)
-          : recentlyInteractedIds
-        
-        set({ 
-          selectedPrompt,
+      openPromptEditor: async (prompt?: Prompt) => {
+        const target = prompt ?? null
+        const { isPromptEditorOpen, selectedPrompt } = get()
+        const alreadyOpen = isPromptEditorOpen && (selectedPrompt?.id ?? null) === (target?.id ?? null)
+        if (!alreadyOpen && !(await confirmDiscardChanges())) return false
+
+        const { recentlyInteractedIds, isPromptViewerOpen } = get()
+        editorOpenedFromViewer = target !== null && isPromptViewerOpen && get().selectedPrompt?.id === target.id
+        set({
+          selectedPrompt: target,
           isPromptEditorOpen: true,
           isPromptViewerOpen: false, // Close viewer if open
           isTemplateEditorOpen: false, // Close template editor if open
-          recentlyInteractedIds: updatedRecentIds
+          selectedTemplate: null,
+          isSettingsOpen: false,
+          // Track interaction if editing existing prompt
+          recentlyInteractedIds: target ? trackInteraction(target.id, recentlyInteractedIds) : recentlyInteractedIds
         })
-        persistEditorState(true, selectedPrompt)
+        persistEditorState(true, target)
+        return true
       },
 
       closePromptEditor: () => {
-        set({ 
-          selectedPrompt: null,
-          isPromptEditorOpen: false 
+        const { selectedPrompt, prompts } = get()
+        // Latest version of the prompt (it may have just been saved)
+        const returnTo = editorOpenedFromViewer && selectedPrompt
+          ? prompts.find((p) => p.id === selectedPrompt.id) ?? null
+          : null
+        editorOpenedFromViewer = false
+        set({
+          selectedPrompt: returnTo,
+          isPromptViewerOpen: returnTo !== null,
+          isPromptEditorOpen: false,
+          isEditorDirty: false,
+          draftFormData: null
         })
         clearPersistedEditorState()
       },
 
-      openPromptViewer: (prompt: Prompt) => {
-        const { recentlyInteractedIds } = get()
-        
-        // Track interaction (viewing)
-        const updatedRecentIds = trackInteraction(prompt.id, recentlyInteractedIds)
-        
-        set({ 
+      openPromptViewer: async (prompt: Prompt) => {
+        if (!(await confirmDiscardChanges())) return false
+        const { recentlyInteractedIds, isPromptEditorOpen } = get()
+
+        set({
           selectedPrompt: prompt,
           isPromptViewerOpen: true,
           isPromptEditorOpen: false, // Close editor if open
           isTemplateEditorOpen: false, // Close template editor if open
-          recentlyInteractedIds: updatedRecentIds
+          selectedTemplate: null,
+          isSettingsOpen: false,
+          // Track interaction (viewing)
+          recentlyInteractedIds: trackInteraction(prompt.id, recentlyInteractedIds)
         })
+        if (isPromptEditorOpen) {
+          persistEditorState(false, null)
+        }
+        return true
       },
 
       closePromptViewer: () => {
-        set({ 
+        set({
           selectedPrompt: null,
-          isPromptViewerOpen: false 
+          isPromptViewerOpen: false
         })
       },
 
-      openSettings: () => {
-        set({ 
+      openSettings: async (tab?: SettingsTab) => {
+        // Also used directly as an event handler: ignore anything that is not a tab name
+        const settingsTab = SETTINGS_TABS.includes(tab as SettingsTab) ? tab : undefined
+        const { isSettingsOpen, isPromptEditorOpen } = get()
+        if (!isSettingsOpen && !(await confirmDiscardChanges())) return false
+        set({
           isSettingsOpen: true,
+          ...(settingsTab ? { settingsTab } : {}),
           isPromptEditorOpen: false,
           isPromptViewerOpen: false,
-          selectedPrompt: null 
+          isTemplateEditorOpen: false,
+          selectedTemplate: null,
+          selectedPrompt: null,
+          isEditorDirty: false
         })
+        if (isPromptEditorOpen) {
+          persistEditorState(false, null)
+        }
+        return true
       },
 
       closeSettings: () => {
         set({ isSettingsOpen: false })
       },
 
+      setSettingsTab: (tab: SettingsTab) => {
+        set({ settingsTab: tab })
+      },
+
+      setActiveMainTab: (tab: MainTab) => {
+        set({ activeMainTab: tab })
+      },
+
+      setEditorDirty: (dirty: boolean) => {
+        set({ isEditorDirty: dirty })
+      },
+
+      confirmDiscardChanges,
+
       // Template editor actions
-      openTemplateEditor: (template?: Template) => {
-        set({ 
-          selectedTemplate: template || null,
+      openTemplateEditor: async (template?: Template) => {
+        const target = template ?? null
+        const { isTemplateEditorOpen, selectedTemplate } = get()
+        const alreadyOpen = isTemplateEditorOpen && (selectedTemplate?.id ?? null) === (target?.id ?? null)
+        if (!alreadyOpen && !(await confirmDiscardChanges())) return false
+        const { isPromptEditorOpen } = get()
+        set({
+          selectedTemplate: target,
           isTemplateEditorOpen: true,
           // Close other editors
           isPromptEditorOpen: false,
           isPromptViewerOpen: false,
           isSettingsOpen: false
         })
+        if (isPromptEditorOpen) {
+          persistEditorState(false, null)
+        }
+        return true
       },
 
       closeTemplateEditor: () => {
-        set({ 
+        set({
           selectedTemplate: null,
-          isTemplateEditorOpen: false 
+          isTemplateEditorOpen: false,
+          isEditorDirty: false
         })
       },
 
@@ -961,13 +1203,9 @@ export const usePromptStore = create<PromptStore>()(
         const id = generateToastId()
         const newToast: ToastMessage = { ...toast, id }
         const { toasts } = get()
+        // The Toaster (Radix) dismisses it after `duration`, pausing while hovered or focused,
+        // and then calls removeToast
         set({ toasts: [...toasts, newToast] })
-
-        // Auto-remove toast after duration
-        const duration = toast.duration || 5000
-        setTimeout(() => {
-          get().removeToast(id)
-        }, duration)
       },
 
       removeToast: (id: string) => {
@@ -977,6 +1215,36 @@ export const usePromptStore = create<PromptStore>()(
 
       clearToasts: () => {
         set({ toasts: [] })
+      },
+
+      resetLocalState: () => {
+        try {
+          localStorage.clear()
+        } catch {
+          // Ignore storage errors
+        }
+        try {
+          sessionStorage.clear()
+        } catch {
+          // Ignore storage errors
+        }
+        set({
+          searchFilters: deriveSearchFilters('', get().categories),
+          sortOptions: DEFAULT_SORT_OPTIONS,
+          templateSearchQuery: '',
+          promptViewMode: 'list',
+          templateViewMode: 'list',
+          selectedPrompt: null,
+          isPromptEditorOpen: false,
+          isPromptViewerOpen: false,
+          selectedTemplate: null,
+          isTemplateEditorOpen: false,
+          isEditorDirty: false,
+          draftFormData: null,
+          recentlyInteractedIds: [],
+          mcpConfig: { ...DEFAULT_MCP_CONFIG, allowedOrigins: ['*'] },
+          exposedPrompts: []
+        })
       },
 
       // Error handling
@@ -995,12 +1263,7 @@ export const usePromptStore = create<PromptStore>()(
       },
 
       clearDraftFormData: () => {
-        set({ draftFormData: null })
-        try {
-          localStorage.removeItem(STORAGE_KEYS.DRAFT_FORM_DATA)
-        } catch {
-          // Ignore storage errors
-        }
+        clearDraft()
       },
 
       getDraftFormData: () => {
@@ -1014,11 +1277,11 @@ export const usePromptStore = create<PromptStore>()(
 
       getFilteredTemplates: () => {
         const { templates, templateSearchQuery } = get()
-        
+
         if (!templateSearchQuery.trim()) {
           return templates
         }
-        
+
         const query = templateSearchQuery.toLowerCase()
         return templates.filter(template =>
           template.name.toLowerCase().includes(query) ||
@@ -1038,7 +1301,7 @@ export const usePromptStore = create<PromptStore>()(
         set({ templateViewMode: mode })
         persistViewMode(STORAGE_KEYS.TEMPLATE_VIEW_MODE, mode)
       },
-      
+
       // MCP Server actions
       updateMcpConfig: (config: Partial<McpServerConfig>) => {
         const currentConfig = get().mcpConfig
@@ -1046,15 +1309,15 @@ export const usePromptStore = create<PromptStore>()(
         set({ mcpConfig: newConfig })
         persistMcpConfig(newConfig)
       },
-      
+
       togglePromptExposure: (promptId: number) => {
         const exposedPrompts = get().exposedPrompts
         const prompts = get().prompts
         const existing = exposedPrompts.find(p => p.id === promptId)
-        
+
         if (existing) {
           // Toggle existing
-          const updated = exposedPrompts.map(p => 
+          const updated = exposedPrompts.map(p =>
             p.id === promptId ? { ...p, exposed: !p.exposed } : p
           )
           set({ exposedPrompts: updated })
@@ -1074,15 +1337,15 @@ export const usePromptStore = create<PromptStore>()(
           persistExposedPrompts(updated)
         }
       },
-      
+
       setPromptExposure: (promptId: number, exposed: boolean) => {
         const exposedPrompts = get().exposedPrompts
         const prompts = get().prompts
         const existing = exposedPrompts.find(p => p.id === promptId)
-        
+
         if (existing) {
           // Update existing
-          const updated = exposedPrompts.map(p => 
+          const updated = exposedPrompts.map(p =>
             p.id === promptId ? { ...p, exposed } : p
           )
           set({ exposedPrompts: updated })
@@ -1102,22 +1365,22 @@ export const usePromptStore = create<PromptStore>()(
           persistExposedPrompts(updated)
         }
       },
-      
+
       getExposedPrompts: () => {
         return get().exposedPrompts
       },
-      
+
       migrateLegacyEndpoints: () => {
         const exposedPrompts = get().exposedPrompts
         const prompts = get().prompts
-        
+
         // Find all exposed prompts that don't have secure hashes
-        const legacyPrompts = exposedPrompts.filter(ep => 
+        const legacyPrompts = exposedPrompts.filter(ep =>
           ep.exposed && (!ep.secureHash || ep.endpoint.includes('/prompts/') && /\/prompts\/\d+$/.test(ep.endpoint))
         )
-        
+
         if (legacyPrompts.length === 0) return
-        
+
         // Generate secure hashes for legacy prompts
         const updated = exposedPrompts.map(ep => {
           if (legacyPrompts.some(lp => lp.id === ep.id)) {
@@ -1131,11 +1394,12 @@ export const usePromptStore = create<PromptStore>()(
           }
           return ep
         })
-        
+
         set({ exposedPrompts: updated })
         persistExposedPrompts(updated)
       }
-    }),
+      }
+    },
     {
       name: 'prompt-store'
     }

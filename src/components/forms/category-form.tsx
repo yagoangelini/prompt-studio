@@ -6,6 +6,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Save, Loader2, Palette } from 'lucide-react'
 import { usePromptStore } from '@/stores/usePromptStore'
+import { normalizeSearchText } from '@/lib/search-parser'
 import { createCategorySchema, updateCategorySchema, CreateCategoryFormData, UpdateCategoryFormData } from '@/lib/validations'
 import type { Category } from '@/types'
 
@@ -21,8 +22,11 @@ const COLOR_PRESETS = [
   '#ff9f43', '#10ac84', '#ee5a24', '#0984e3', '#6c5ce7'
 ]
 
+// Case and accents are ignored, like the backend check and the search
+const categoryNameKey = (name: string) => normalizeSearchText(name)
+
 export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProps) {
-  const { createCategory, updateCategory } = usePromptStore()
+  const { createCategory, updateCategory, categories } = usePromptStore()
   
   const isEditing = !!category
   const schema = isEditing ? updateCategorySchema : createCategorySchema
@@ -41,6 +45,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
     handleSubmit,
     formState: { errors, isSubmitting },
     setValue,
+    setError,
     watch,
     reset,
   } = form
@@ -48,13 +53,30 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
   const watchedColor = watch('color')
 
   const onSubmit = async (data: CreateCategoryFormData | UpdateCategoryFormData) => {
+    const name = (data.name ?? '').trim()
+    const duplicate = categories.find(
+      (existing) => existing.id !== category?.id && categoryNameKey(existing.name) === categoryNameKey(name)
+    )
+    if (duplicate) {
+      setError('name', { type: 'duplicate', message: `Já existe uma categoria chamada "${duplicate.name}".` }, { shouldFocus: true })
+      return
+    }
+
     try {
-      if (isEditing && category) {
-        await updateCategory(category.id, data as UpdateCategoryFormData)
-      } else {
-        await createCategory(data as CreateCategoryFormData)
+      const payload = { ...data, name }
+      const saved = isEditing && category
+        ? await updateCategory(category.id, payload as UpdateCategoryFormData)
+        : await createCategory(payload as CreateCategoryFormData)
+      if (saved) {
+        onSuccess?.()
+        return
       }
-      onSuccess?.()
+      // The store already showed the error; a duplicate name reported by the database also goes to the field
+      const message = usePromptStore.getState().error ?? ''
+      const duplicateIndex = message.indexOf('Já existe uma categoria')
+      if (duplicateIndex >= 0) {
+        setError('name', { type: 'duplicate', message: message.slice(duplicateIndex) }, { shouldFocus: true })
+      }
     } catch (error) {
       console.error('Failed to save category:', error)
     }
@@ -70,24 +92,27 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
       {/* Name */}
       <div className="space-y-2">
         <Label htmlFor="name">
-          Name <span className="text-destructive">*</span>
+          Nome <span className="text-destructive">*</span>
         </Label>
         <Input
           id="name"
-          placeholder="Enter category name..."
+          placeholder="Digite o nome da categoria..."
+          aria-required="true"
+          aria-invalid={Boolean(errors.name)}
+          aria-describedby={errors.name ? 'category-name-error' : undefined}
           {...register('name')}
         />
         {errors.name && (
-          <p className="text-sm text-destructive">{errors.name.message}</p>
+          <p id="category-name-error" className="text-sm text-destructive">{errors.name.message}</p>
         )}
       </div>
 
       {/* Description */}
       <div className="space-y-2">
-        <Label htmlFor="description">Description (optional)</Label>
+        <Label htmlFor="description">Descrição (opcional)</Label>
         <Textarea
           id="description"
-          placeholder="Add a description for this category..."
+          placeholder="Adicione uma descrição para esta categoria..."
           className="min-h-[80px]"
           {...register('description')}
         />
@@ -98,7 +123,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
 
       {/* Color */}
       <div className="space-y-4">
-        <Label>Color</Label>
+        <Label>Cor</Label>
         
         {/* Current Color Display */}
         <div className="flex items-center space-x-3">
@@ -111,13 +136,15 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
             value={watchedColor}
             onChange={(e) => setValue('color', e.target.value)}
             className="w-20 h-8 border-0 p-0"
+            aria-label="Selecionar cor"
           />
+          {/* register() provides onChange, so the typed value goes straight to the form */}
           <Input
             type="text"
             value={watchedColor}
-            onChange={(e) => setValue('color', e.target.value)}
             placeholder="#007acc"
             className="flex-1"
+            aria-label="Código da cor"
             {...register('color')}
           />
         </div>
@@ -130,7 +157,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
         <div>
           <Label className="text-sm text-muted-foreground mb-2 block">
             <Palette className="h-4 w-4 inline mr-1" />
-            Quick Colors
+            Cores predefinidas
           </Label>
           <div className="grid grid-cols-8 gap-2">
             {COLOR_PRESETS.map((color) => (
@@ -141,6 +168,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
                 style={{ backgroundColor: color }}
                 onClick={() => setValue('color', color)}
                 title={color}
+                aria-label={`Usar a cor ${color}`}
               />
             ))}
           </div>
@@ -155,7 +183,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
           onClick={handleCancel}
           disabled={isSubmitting}
         >
-          Cancel
+          Cancelar
         </Button>
         <Button
           type="submit"
@@ -163,7 +191,7 @@ export function CategoryForm({ category, onSuccess, onCancel }: CategoryFormProp
         >
           {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
           <Save className="h-4 w-4 mr-2" />
-          {isEditing ? 'Update' : 'Create'} Category
+          {isEditing ? 'Atualizar' : 'Criar'} categoria
         </Button>
       </div>
     </form>
