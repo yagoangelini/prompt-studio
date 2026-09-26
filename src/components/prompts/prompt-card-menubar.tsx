@@ -6,7 +6,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePromptStore } from '@/stores/usePromptStore'
 import { formatDistanceToNow } from 'date-fns'
-import { cn } from '@/lib/utils'
+import { ptBR } from 'date-fns/locale'
+import { cn, parseDbDate } from '@/lib/utils'
+import { copyPrompt } from '@/lib/copy-prompt'
 import type { Prompt } from '@/types'
 
 interface MenubarPromptCardProps {
@@ -17,11 +19,10 @@ interface MenubarPromptCardProps {
 export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
   const [isExpanded, setIsExpanded] = useState(false)
   const [justCopied, setJustCopied] = useState(false)
-  const [isHovered, setIsHovered] = useState(false)
   const [contentHeight, setContentHeight] = useState(192) // Default 192px (h-48)
   const [isDragging, setIsDragging] = useState(false)
   
-  const { updatePrompt, duplicatePrompt, addToast } = usePromptStore()
+  const { updatePrompt, duplicatePrompt } = usePromptStore()
 
   const handleFavoriteToggle = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -34,21 +35,39 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
     }
   }
 
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation()
+  // Fills the {{variables}} first (if any), copies, counts the usage and shows the toast. `origin`
+  // gets the focus back when the variables dialog closes (it has no trigger, so the focus would land on
+  // <body> and the arrows would start over from the first card).
+  const copy = async (origin: HTMLElement | null) => {
     try {
-      await window.electronAPI.copyToClipboard(prompt.content)
-      setJustCopied(true)
-      setTimeout(() => setJustCopied(false), 2000)
-      
-      addToast({
-        type: 'success',
-        title: 'Copied',
-        description: 'Prompt copied to clipboard'
-      })
+      if (await copyPrompt(prompt)) {
+        setJustCopied(true)
+        setTimeout(() => setJustCopied(false), 2000)
+      }
     } catch (error) {
       console.error('Failed to copy:', error)
+    } finally {
+      // After the dialog is gone: its focus scope gives the focus away right after unmounting
+      setTimeout(() => {
+        const active = document.activeElement
+        const lost = !active || active === document.body
+        if (origin?.isConnected && lost) origin.focus()
+      }, 50)
     }
+  }
+
+  const handleCopy = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
+    void copy(e.currentTarget.closest<HTMLElement>('[data-menubar-card]'))
+  }
+
+  // Enter on the card itself (not on one of its buttons) copies it; the menu bar layout moves the
+  // focus between cards with the arrows
+  const handleCardKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Enter' || e.target !== e.currentTarget || e.nativeEvent.isComposing) return
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
+    e.preventDefault()
+    void copy(e.currentTarget)
   }
 
   const handleEdit = (e: React.MouseEvent) => {
@@ -72,12 +91,12 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
 
   const formatDate = (dateString: string) => {
     try {
-      const date = new Date(dateString)
-      const distance = formatDistanceToNow(date, { addSuffix: true })
+      const date = parseDbDate(dateString)
+      const distance = formatDistanceToNow(date, { addSuffix: true, locale: ptBR })
       // Shorten the output for menubar
-      return distance.replace('about ', '').replace('less than ', '<')
+      return distance.replace('cerca de ', '').replace('há menos de um minuto', 'agora')
     } catch {
-      return 'Unknown'
+      return 'Desconhecida'
     }
   }
 
@@ -107,14 +126,18 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
   return (
     <TooltipProvider>
       <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-        <div 
+        <div
+          tabIndex={0}
+          role="group"
+          aria-label={`${prompt.title} (Enter copia)`}
+          aria-keyshortcuts="Enter"
+          data-menubar-card=""
+          onKeyDown={handleCardKeyDown}
           className={cn(
             "group border rounded-lg transition-all duration-200",
             isExpanded ? "bg-accent/50 border-accent" : "hover:border-accent hover:bg-accent/20",
-            "relative"
+            "relative outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-accent"
           )}
-          onMouseEnter={() => setIsHovered(true)}
-          onMouseLeave={() => setIsHovered(false)}
         >
           {/* Main Card Content */}
           <div className="p-2.5">
@@ -123,10 +146,7 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
               <div className="flex-1 min-w-0">
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <h4 className={cn(
-                      "text-sm font-medium line-clamp-1 cursor-help",
-                      isHovered ? "pr-1" : "pr-0"
-                    )}>
+                    <h4 className="text-sm font-medium line-clamp-1 cursor-help">
                       {prompt.title}
                     </h4>
                   </TooltipTrigger>
@@ -177,29 +197,30 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                 )}
               </div>
 
-              {/* Action Buttons */}
-              {isHovered && (
-                <div className="flex items-center gap-1 shrink-0 transition-opacity duration-200 opacity-100">
-                  {/* Expand/Collapse */}
+              {/* Action buttons: always in the DOM so they can be reached with Tab; shown on hover or
+                  when one of them has the keyboard focus. 24 px targets. */}
+              <div className="absolute right-1.5 top-1.5 flex items-center gap-1 shrink-0 rounded-md bg-background/95 p-0.5 shadow-sm opacity-0 pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto">
+                {/* Expand/Collapse */}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <CollapsibleTrigger asChild>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-4 w-4 p-0"
+                        className="h-6 w-6 p-0"
                         onClick={toggleExpanded}
+                        aria-label={isExpanded ? 'Recolher conteúdo' : 'Ver conteúdo'}
                       >
                         {isExpanded ? (
-                          <ChevronUp className="h-1.5 w-1.5" />
+                          <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
                         ) : (
-                          <ChevronDown className="h-1.5 w-1.5" />
+                          <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
                         )}
                       </Button>
                     </CollapsibleTrigger>
                   </TooltipTrigger>
                   <TooltipContent side="top">
-                    <p className="text-xs">{isExpanded ? 'Collapse' : 'View content'}</p>
+                    <p className="text-xs">{isExpanded ? 'Recolher' : 'Ver conteúdo'}</p>
                   </TooltipContent>
                 </Tooltip>
 
@@ -210,17 +231,18 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                       variant="ghost"
                       size="sm"
                       onClick={handleCopy}
-                      className="h-4 w-4 p-0"
+                      className="h-6 w-6 p-0"
+                      aria-label="Copiar conteúdo"
                     >
                       {justCopied ? (
-                        <Check className="h-2 w-2 text-green-600" />
+                        <Check className="h-3.5 w-3.5 text-green-600" aria-hidden="true" />
                       ) : (
-                        <Copy className="h-1.5 w-1.5" />
+                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
                       )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">
-                    <p className="text-xs">Copy</p>
+                    <p className="text-xs">Copiar</p>
                   </TooltipContent>
                 </Tooltip>
 
@@ -231,16 +253,18 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                       variant="ghost"
                       size="sm"
                       onClick={handleFavoriteToggle}
-                      className="h-4 w-4 p-0"
+                      className="h-6 w-6 p-0"
+                      aria-label={prompt.is_favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+                      aria-pressed={prompt.is_favorite}
                     >
                       <Heart className={cn(
-                        "h-2 w-2",
+                        "h-3.5 w-3.5",
                         prompt.is_favorite && "fill-current text-red-500"
-                      )} />
+                      )} aria-hidden="true" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">
-                    <p className="text-xs">{prompt.is_favorite ? 'Unfavorite' : 'Favorite'}</p>
+                    <p className="text-xs">{prompt.is_favorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}</p>
                   </TooltipContent>
                 </Tooltip>
 
@@ -251,13 +275,14 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                       variant="ghost"
                       size="sm"
                       onClick={handleDuplicate}
-                      className="h-4 w-4 p-0"
+                      className="h-6 w-6 p-0"
+                      aria-label="Duplicar"
                     >
-                      <Files className="h-1.5 w-1.5" />
+                      <Files className="h-3.5 w-3.5" aria-hidden="true" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">
-                    <p className="text-xs">Duplicate</p>
+                    <p className="text-xs">Duplicar</p>
                   </TooltipContent>
                 </Tooltip>
 
@@ -268,17 +293,17 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                       variant="ghost"
                       size="sm"
                       onClick={handleEdit}
-                      className="h-4 w-4 p-0"
+                      className="h-6 w-6 p-0"
+                      aria-label="Editar"
                     >
-                      <Edit className="h-1.5 w-1.5" />
+                      <Edit className="h-3.5 w-3.5" aria-hidden="true" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">
-                    <p className="text-xs">Edit</p>
+                    <p className="text-xs">Editar</p>
                   </TooltipContent>
                 </Tooltip>
-                </div>
-              )}
+              </div>
             </div>
           </div>
 
@@ -310,7 +335,7 @@ export function MenubarPromptCard({ prompt, onClick }: MenubarPromptCardProps) {
                       isDragging && "bg-accent/70"
                     )}
                     onMouseDown={handleMouseDown}
-                    title="Drag to resize"
+                    title="Arraste para redimensionar"
                   >
                     <GripHorizontal className="h-3 w-3 text-muted-foreground" />
                   </div>

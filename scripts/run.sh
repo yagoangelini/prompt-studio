@@ -8,8 +8,8 @@ set -e  # Exit on any error
 # Global variables
 PACKAGE_MANAGER=""
 
-echo "🚀 Prompt Studio Development Runner"
-echo "=================================="
+echo "🚀 Prompt Studio - Modo de desenvolvimento"
+echo "=========================================="
 
 # Colors for output
 RED='\033[0;31m'
@@ -24,49 +24,49 @@ print_status() {
 }
 
 print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCESSO]${NC} $1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+    echo -e "${YELLOW}[AVISO]${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERRO]${NC} $1"
 }
 
 # Check if Node.js is installed
 check_node() {
-    print_status "Checking Node.js installation..."
+    print_status "Verificando a instalação do Node.js..."
     
     if ! command -v node &> /dev/null; then
-        print_error "Node.js is not installed!"
-        print_status "Please install Node.js from https://nodejs.org/"
-        print_status "Recommended version: 18.x or higher"
+        print_error "O Node.js não está instalado!"
+        print_status "Instale o Node.js em https://nodejs.org/"
+        print_status "Versão recomendada: 18.x ou superior"
         exit 1
     fi
     
     NODE_VERSION=$(node --version)
-    print_success "Node.js found: $NODE_VERSION"
+    print_success "Node.js encontrado: $NODE_VERSION"
     
     # Check Node version (require v16+)
     NODE_MAJOR=$(echo $NODE_VERSION | cut -d'.' -f1 | sed 's/v//')
     if [ "$NODE_MAJOR" -lt 16 ]; then
-        print_warning "Node.js version is older than recommended (v16+)"
-        print_status "Your version: $NODE_VERSION"
-        print_status "Please consider upgrading for best compatibility"
+        print_warning "A versão do Node.js é anterior à recomendada (v16+)"
+        print_status "Sua versão: $NODE_VERSION"
+        print_status "Considere atualizar para garantir a melhor compatibilidade"
     fi
 }
 
 # Check package manager (prefer pnpm, fallback to npm)
 check_package_manager() {
-    print_status "Checking package manager..."
+    print_status "Verificando o gerenciador de pacotes..."
     
     # Check for pnpm first (project preference)
     if command -v pnpm &> /dev/null; then
         PACKAGE_MANAGER="pnpm"
         PNPM_VERSION=$(pnpm --version)
-        print_success "pnpm found: v$PNPM_VERSION"
+        print_success "pnpm encontrado: v$PNPM_VERSION"
         return
     fi
     
@@ -74,78 +74,78 @@ check_package_manager() {
     if command -v npm &> /dev/null; then
         PACKAGE_MANAGER="npm"
         NPM_VERSION=$(npm --version)
-        print_success "npm found: v$NPM_VERSION"
+        print_success "npm encontrado: v$NPM_VERSION"
         return
     fi
     
-    print_error "No package manager found!"
-    print_status "Please install pnpm (recommended) or npm"
+    print_error "Nenhum gerenciador de pacotes encontrado!"
+    print_status "Instale o pnpm (recomendado) ou o npm"
     print_status "pnpm: npm install -g pnpm"
-    print_status "npm: usually comes with Node.js installation"
+    print_status "npm: normalmente já vem com a instalação do Node.js"
     exit 1
 }
 
 # Check if we're in the correct directory
 check_directory() {
-    print_status "Checking project directory..."
+    print_status "Verificando o diretório do projeto..."
     
     if [ ! -f "package.json" ]; then
-        print_error "package.json not found!"
-        print_status "Please run this script from the project root directory"
+        print_error "package.json não encontrado!"
+        print_status "Execute este script a partir do diretório raiz do projeto"
         exit 1
     fi
     
     # Check for TypeScript Electron project structure
     if [ ! -f "electron/main.ts" ] && [ ! -f "dist-electron/main.js" ]; then
-        print_error "Electron main file not found!"
-        print_status "Looking for electron/main.ts or dist-electron/main.js"
-        print_status "Project structure appears incomplete"
+        print_error "Arquivo principal do Electron não encontrado!"
+        print_status "Arquivos procurados: electron/main.ts ou dist-electron/main.js"
+        print_status "A estrutura do projeto parece incompleta"
         exit 1
     fi
     
     if [ ! -f "vite.config.ts" ]; then
-        print_error "vite.config.ts not found!"
-        print_status "This doesn't appear to be a Vite-based Electron project"
+        print_error "vite.config.ts não encontrado!"
+        print_status "Este não parece ser um projeto Electron baseado em Vite"
         exit 1
     fi
     
-    print_success "Project structure looks good"
+    print_success "A estrutura do projeto está correta"
 }
 
 # Install dependencies
 install_dependencies() {
-    print_status "Checking dependencies..."
+    print_status "Verificando as dependências..."
     
     if [ ! -d "node_modules" ]; then
-        print_status "Installing dependencies... (this may take a few minutes)"
+        print_status "Instalando as dependências... (isso pode levar alguns minutos)"
         
         # Use the detected package manager
         if $PACKAGE_MANAGER install; then
-            print_success "Dependencies installed successfully"
+            print_success "Dependências instaladas com sucesso"
         else
-            print_error "Failed to install dependencies"
-            print_status "Try running: $PACKAGE_MANAGER install"
-            print_status "Or delete node_modules and lock files, then try again"
+            print_error "Não foi possível instalar as dependências"
+            print_status "Tente executar: $PACKAGE_MANAGER install"
+            print_status "Ou exclua a pasta node_modules e os arquivos de lock e tente novamente"
             exit 1
         fi
     else
-        print_success "Dependencies already installed"
+        print_success "As dependências já estão instaladas"
         
         # Check if we need to update (only for npm, pnpm has different syntax)
         if [ "$PACKAGE_MANAGER" = "npm" ] && npm outdated --parseable 2>/dev/null | grep -q .; then
-            print_warning "Some dependencies may be outdated"
-            print_status "Run '$PACKAGE_MANAGER update' to update them"
+            print_warning "Algumas dependências podem estar desatualizadas"
+            print_status "Execute '$PACKAGE_MANAGER update' para atualizá-las"
         fi
     fi
 }
 
 # Check for native dependencies (sqlite3)
 check_native_deps() {
-    print_status "Checking native dependencies..."
+    print_status "Verificando as dependências nativas..."
     
     if [ ! -d "node_modules/sqlite3" ]; then
-        print_warning "sqlite3 not found in node_modules"
-        print_status "This might cause issues. Reinstalling dependencies..."
+        print_warning "sqlite3 não encontrado em node_modules"
+        print_status "Isso pode causar problemas. Reinstalando as dependências..."
         rm -rf node_modules
         if [ -f "pnpm-lock.yaml" ]; then
             rm -f pnpm-lock.yaml
@@ -170,28 +170,28 @@ check_native_deps() {
     SQLITE_BINDING="node_modules/sqlite3/lib/binding/napi-v6-${PLATFORM}-${ARCH}/node_sqlite3.node"
     
     if [ ! -f "$SQLITE_BINDING" ]; then
-        print_warning "sqlite3 binary not found for $PLATFORM-$ARCH, rebuilding..."
+        print_warning "Binário do sqlite3 não encontrado para $PLATFORM-$ARCH. Recompilando..."
         $PACKAGE_MANAGER rebuild sqlite3
     fi
     
-    print_success "Native dependencies check complete"
+    print_success "Verificação das dependências nativas concluída"
 }
 
 # Create necessary directories
 create_directories() {
-    print_status "Creating necessary directories..."
+    print_status "Criando os diretórios necessários..."
     
     mkdir -p assets
     mkdir -p src/database
     mkdir -p src/renderer
     mkdir -p scripts
     
-    print_success "Directories created"
+    print_success "Diretórios criados"
 }
 
 # Set environment variables for development
 set_dev_env() {
-    print_status "Setting development environment..."
+    print_status "Configurando o ambiente de desenvolvimento..."
     
     # Set NODE_ENV if not already set
     if [ -z "$NODE_ENV" ]; then
@@ -203,19 +203,19 @@ set_dev_env() {
         export ELECTRON_ENABLE_LOGGING=1
         export ELECTRON_ENABLE_STACK_DUMPING=1
         export ENABLE_DEV_TOOLS=true
-        print_status "Debug mode enabled - DevTools will open automatically"
+        print_status "Modo de depuração ativado - o DevTools abrirá automaticamente"
     else
-        print_status "DevTools disabled by default - use Ctrl+Shift+I or F12 to toggle"
+        print_status "DevTools desativado por padrão - use Ctrl+Shift+I ou F12 para abrir/fechar"
     fi
     
-    print_success "Environment configured"
+    print_success "Ambiente configurado"
 }
 
 # Start the application
 start_app() {
-    print_status "Starting Prompt Studio..."
-    print_status "This will start both the Vite dev server and Electron"
-    print_status "Press Ctrl+C to stop the application"
+    print_status "Iniciando o Prompt Studio..."
+    print_status "Isso vai iniciar o servidor de desenvolvimento do Vite e o Electron"
+    print_status "Pressione Ctrl+C para encerrar o aplicativo"
     echo ""
     
     # Use the correct development command for Electron + Vite
@@ -225,7 +225,7 @@ start_app() {
 # Main execution
 main() {
     echo ""
-    print_status "Starting pre-flight checks..."
+    print_status "Iniciando as verificações preliminares..."
     
     check_node
     check_package_manager
@@ -236,7 +236,7 @@ main() {
     set_dev_env "$1"
     
     echo ""
-    print_success "All checks passed! 🎉"
+    print_success "Todas as verificações passaram! 🎉"
     echo ""
     
     start_app
@@ -244,26 +244,26 @@ main() {
 
 # Handle script arguments
 if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    echo "Prompt Studio Development Runner"
+    echo "Prompt Studio - Modo de desenvolvimento"
     echo ""
-    echo "Usage: $0 [options]"
+    echo "Uso: $0 [opções]"
     echo ""
-    echo "Options:"
-    echo "  --help, -h    Show this help message"
-    echo "  --debug       Enable debug mode with extra logging"
+    echo "Opções:"
+    echo "  --help, -h    Mostra esta mensagem de ajuda"
+    echo "  --debug       Ativa o modo de depuração com logs adicionais"
     echo ""
-    echo "This script will:"
-    echo "  1. Check Node.js and package manager installation (pnpm preferred)"
-    echo "  2. Verify TypeScript Electron + Vite project structure"
-    echo "  3. Install dependencies if needed"
-    echo "  4. Check native dependencies (sqlite3)"
-    echo "  5. Start the application in development mode (Vite + Electron)"
+    echo "Este script vai:"
+    echo "  1. Verificar a instalação do Node.js e do gerenciador de pacotes (pnpm é o preferido)"
+    echo "  2. Verificar a estrutura do projeto TypeScript + Electron + Vite"
+    echo "  3. Instalar as dependências, se necessário"
+    echo "  4. Verificar as dependências nativas (sqlite3)"
+    echo "  5. Iniciar o aplicativo em modo de desenvolvimento (Vite + Electron)"
     echo ""
     exit 0
 fi
 
 # Trap Ctrl+C and cleanup
-trap 'print_status "Shutting down..."; exit 0' INT
+trap 'print_status "Encerrando..."; exit 0' INT
 
 # Run main function
 main "$1"

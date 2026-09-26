@@ -32,12 +32,12 @@ export class CrashHandler extends Component<CrashHandlerProps, CrashHandlerState
     }
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+  override componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('Crash Handler caught an error:', error, errorInfo)
     
     // Enhanced error reporting
     const enhancedErrorInfo = {
-      componentStack: errorInfo.componentStack,
+      componentStack: errorInfo.componentStack ?? undefined,
       errorBoundary: 'CrashHandler'
     }
 
@@ -113,17 +113,18 @@ export class CrashHandler extends Component<CrashHandlerProps, CrashHandlerState
     })
   }
 
-  render() {
+  override render() {
     if (this.state.hasError) {
       // Custom fallback UI
       if (this.props.fallback) {
         return this.props.fallback
       }
 
-      // Default crash dialog
+      // Default crash dialog. The children are not rendered again: if the error comes from the data
+      // (e.g. an invalid record), rendering them would throw again and blank the whole window.
       return (
         <>
-          {this.props.children}
+          <div className="h-screen bg-background" />
           <CrashDialog
             open={true}
             onOpenChange={(open) => {
@@ -132,7 +133,7 @@ export class CrashHandler extends Component<CrashHandlerProps, CrashHandlerState
               }
             }}
             error={this.state.error}
-            errorInfo={this.state.errorInfo}
+            errorInfo={this.state.errorInfo ?? undefined}
             onRestart={this.handleRestart}
           />
         </>

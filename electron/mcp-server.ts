@@ -1,540 +1,880 @@
-import { createServer, IncomingMessage, ServerResponse } from 'http'
-import { parse } from 'url'
-import { Database } from 'sqlite3'
+import { createServer, IncomingMessage, Server, ServerResponse } from 'http'
+import type { Socket } from 'net'
+import { createHash, timingSafeEqual } from 'crypto'
+import type { Database } from 'sqlite3'
+import { getAllPrompts } from './database/queries'
+// Same {{variable}} rule as the rest of the app, for the argument list and the substitution alike
+import { extractVariables, parseVariableName, substituteVariables } from '../src/components/templates/template-variables'
+import type {
+  Prompt,
+  McpLogLevel,
+  McpServerLogEntry,
+  McpServerSettings,
+  McpServerStatus,
+} from '../src/types'
 
-interface McpServerConfig {
+// The server is only reachable from this computer, whatever the saved config says
+export const MCP_LISTEN_HOST = '127.0.0.1'
+const MAX_BODY_BYTES = 1024 * 1024
+const RATE_LIMIT_WINDOW_MS = 60_000
+const STOP_TIMEOUT_MS = 3_000
+const MAX_LOGS = 50
+const LOG_LEVELS: readonly McpLogLevel[] = ['debug', 'info', 'warn', 'error']
+const SERVER_VERSION = '1.0.0'
+
+// MCP over Streamable HTTP, stateless, JSON responses (spec 2025-06-18; older clients negotiate down)
+export const MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'] as const
+const LATEST_PROTOCOL_VERSION = MCP_PROTOCOL_VERSIONS[0]
+export const MCP_TOOL_NAME = 'obter_prompt'
+
+interface ServerConfig {
   port: number
-  host: string
   enableAuth: boolean
   apiKey: string
   maxConnections: number
   rateLimit: number
   enableCors: boolean
   enableLogging: boolean
-  logLevel: string
+  logLevel: McpLogLevel
+  name: string
 }
 
-interface ExposedPrompt {
-  id: number
-  secureHash: string
-  exposed: boolean
+interface ExposedEntry {
+  hash: string
+  name: string
+  prompt: Prompt
+  variables: string[]
 }
+
+type JsonRpcId = string | number
+
+interface JsonRpcResponse {
+  jsonrpc: '2.0'
+  id: JsonRpcId | null
+  result?: unknown
+  error?: { code: number; message: string }
+}
+
+class RpcError extends Error {
+  constructor(readonly code: number, message: string) {
+    super(message)
+  }
+}
+
+const RPC_PARSE_ERROR = -32700
+const RPC_INVALID_REQUEST = -32600
+const RPC_METHOD_NOT_FOUND = -32601
+const RPC_INVALID_PARAMS = -32602
+const RPC_INTERNAL_ERROR = -32603
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const toInteger = (value: unknown, fallback: number, min: number, max: number): number => {
+  const number = Number(value)
+  return Number.isInteger(number) && number >= min && number <= max ? number : fallback
+}
+
+const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest()
+
+// Constant-time comparison (hashing first gives both sides the same length)
+const safeEqual = (a: string, b: string) => timingSafeEqual(sha256(a), sha256(b))
+
+const describeDetail = (detail: unknown): string => {
+  if (detail instanceof Error) {
+    const code = (detail as NodeJS.ErrnoException).code
+    return code ? `${detail.message} (${code})` : detail.message
+  }
+  if (typeof detail === 'string') return detail
+  try {
+    return JSON.stringify(detail).slice(0, 500)
+  } catch {
+    return String(detail)
+  }
+}
+
+// "Plano de aula: Ciências" -> "plano-de-aula-ciencias" (MCP prompt names are identifiers)
+const slugify = (title: string): string =>
+  title
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/, '')
+
+const promptSlug = (title: string) => slugify(title) || 'prompt'
+
+// MCP name of an exposed prompt, a function of its own title and id only: the slug of the title when no
+// other prompt (exposed or not) has the same slug, otherwise slug + "_" + id ("resumo_12"). So a name
+// never moves to another prompt when prompts are exposed, hidden, created or renamed: it can only
+// disappear while a namesake exists. Slugs never contain "_", so "slug_id" cannot clash with a plain slug.
+export const mcpPromptName = (prompt: Pick<Prompt, 'id' | 'title'>, slugCounts: ReadonlyMap<string, number>) => {
+  const slug = promptSlug(prompt.title)
+  return (slugCounts.get(slug) ?? 0) > 1 ? `${slug}_${prompt.id}` : slug
+}
+
+// Variables sent by a client: { "nome": "valor" }. Names follow the app rule (letters, digits and "_",
+// the same one used to list the arguments). Returns the map or a pt-BR error message.
+export const parseVariables = (value: unknown): Map<string, string> | string => {
+  const result = new Map<string, string>()
+  if (value === undefined || value === null) return result
+  if (!isPlainObject(value)) return 'As variáveis devem ser um objeto no formato { "nome": "valor" }'
+  for (const [key, raw] of Object.entries(value)) {
+    const parsed = key.length <= 100 ? parseVariableName(key) : null
+    if (!parsed?.ok) {
+      return `Nome de variável inválido: "${key.slice(0, 50)}". Use apenas letras, números e _ (sem espaços, hífens ou pontos).`
+    }
+    if (raw === null || typeof raw === 'object' || typeof raw === 'function') {
+      return `O valor da variável "${key.slice(0, 50)}" deve ser um texto`
+    }
+    result.set(parsed.name, String(raw))
+  }
+  return result
+}
+
+const isLocalHostname = (hostname: string) =>
+  hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1'
 
 class McpServer {
-  private server: any = null
-  private config: McpServerConfig
+  private server: Server | null = null
+  private listening = false
+  private listeningPort = 0
+  private startPromise: Promise<{ success: boolean; message: string; port?: number }> | null = null
+  private stopPromise: Promise<{ success: boolean; message: string }> | null = null
+  private config: ServerConfig
   private db: Database
+  // secureHash -> prompt id
   private exposedPrompts: Map<string, number> = new Map()
+  // Bumped whenever the exposure list is replaced (a pending prune must not touch the new list)
+  private exposureGeneration = 0
   private requestCounts: Map<string, { count: number; resetTime: number }> = new Map()
-  
+  private rateLimitCleanup: ReturnType<typeof setInterval> | null = null
+  private sockets: Set<Socket> = new Set()
+
   // Metrics tracking
   private startTime: number = 0
   private totalRequests: number = 0
   private totalErrors: number = 0
-  private activeConnections: number = 0
-  private recentLogs: Array<{ timestamp: string; level: string; message: string; data?: any }> = []
-  private readonly MAX_LOGS = 50 // Keep more logs internally, show recent 10 in UI
+  private recentLogs: McpServerLogEntry[] = []
 
   constructor(db: Database) {
     this.db = db
     this.config = {
       port: 3000,
-      host: '0.0.0.0',
       enableAuth: true,
       apiKey: '',
       maxConnections: 100,
       rateLimit: 60,
-      enableCors: true,
+      enableCors: false,
       enableLogging: true,
-      logLevel: 'info'
+      logLevel: 'info',
+      name: 'Prompt Studio',
     }
   }
 
-  updateConfig(config: Partial<McpServerConfig>) {
-    this.config = { ...this.config, ...config }
+  // Values come from the renderer: every field is checked, invalid numbers keep the previous value
+  updateConfig(input: unknown) {
+    if (!isPlainObject(input)) return
+    const config = input as Partial<McpServerSettings>
+    const next = { ...this.config }
+    // "host" is ignored on purpose: the server always listens on 127.0.0.1
+    if (config.port !== undefined) next.port = Number(config.port)
+    if (config.enableAuth !== undefined) next.enableAuth = Boolean(config.enableAuth)
+    if (typeof config.apiKey === 'string') next.apiKey = config.apiKey.trim()
+    if (config.maxConnections !== undefined) next.maxConnections = toInteger(config.maxConnections, next.maxConnections, 1, 10_000)
+    if (config.rateLimit !== undefined) next.rateLimit = toInteger(config.rateLimit, next.rateLimit, 1, 100_000)
+    if (config.enableCors !== undefined) next.enableCors = Boolean(config.enableCors)
+    if (config.enableLogging !== undefined) next.enableLogging = Boolean(config.enableLogging)
+    if (typeof config.logLevel === 'string' && (LOG_LEVELS as readonly string[]).includes(config.logLevel)) {
+      next.logLevel = config.logLevel as McpLogLevel
+    }
+    if (typeof config.name === 'string' && config.name.trim()) next.name = config.name.trim()
+    this.config = next
+    if (this.server) this.server.maxConnections = next.maxConnections
   }
 
-  updateExposedPrompts(prompts: ExposedPrompt[]) {
+  // Returns how many prompts are exposed. Entries without a valid secure hash are ignored.
+  updateExposedPrompts(prompts: unknown): number {
     this.exposedPrompts.clear()
-    let count = 0
-    prompts.forEach(p => {
-      if (p.exposed && p.secureHash) {
-        this.exposedPrompts.set(p.secureHash, p.id)
-        count++
+    this.exposureGeneration++
+    const ids = new Set<number>()
+    if (Array.isArray(prompts)) {
+      for (const entry of prompts) {
+        if (!isPlainObject(entry)) continue
+        const { id, secureHash, exposed } = entry
+        if (exposed !== true || typeof id !== 'number' || !Number.isInteger(id) || ids.has(id)) continue
+        if (typeof secureHash !== 'string' || !/^[A-Za-z0-9]{1,128}$/.test(secureHash)) continue
+        ids.add(id)
+        this.exposedPrompts.set(secureHash, id)
       }
-    })
-    this.log('info', `Updated exposed prompts: ${count} prompts now available`)
+    }
+    this.log('info', `Prompts expostos atualizados: ${this.exposedPrompts.size}`)
+    return this.exposedPrompts.size
   }
 
-  private log(level: string, message: string, ...args: any[]) {
-    const timestamp = new Date().toISOString()
-    
-    // Store log entry
-    const logEntry = {
-      timestamp,
-      level: level.toUpperCase(),
+  // Drops the exposures whose prompt no longer exists (deleted in any window or by any path), so the
+  // status only counts prompts that exist. Ids are never reused (AUTOINCREMENT), so dropping is final.
+  async pruneDeletedPrompts(): Promise<void> {
+    if (this.exposedPrompts.size === 0) return
+    const generation = this.exposureGeneration
+    try {
+      const rows = await new Promise<Array<{ id: number }>>((resolve, reject) => {
+        this.db.all('SELECT id FROM prompts', (error: Error | null, result: Array<{ id: number }>) =>
+          error ? reject(error) : resolve(result))
+      })
+      if (generation === this.exposureGeneration) this.dropMissingPrompts(new Set(rows.map((row) => row.id)))
+    } catch (error) {
+      console.error('[MCP Server] Failed to check the exposed prompts:', error)
+    }
+  }
+
+  private dropMissingPrompts(existing: { has(id: number): boolean }) {
+    let removed = 0
+    for (const [hash, id] of this.exposedPrompts) {
+      if (existing.has(id)) continue
+      this.exposedPrompts.delete(hash)
+      removed++
+    }
+    if (removed > 0) this.log('info', `Prompts excluídos retirados da lista de expostos: ${removed}`)
+  }
+
+  private log(level: McpLogLevel, message: string, detail?: unknown) {
+    // Errors are always kept, so a failure is never invisible; the rest follows the log settings
+    if (level !== 'error') {
+      if (!this.config.enableLogging) return
+      if (LOG_LEVELS.indexOf(level) < LOG_LEVELS.indexOf(this.config.logLevel)) return
+    }
+    const entry: McpServerLogEntry = {
+      timestamp: new Date().toISOString(),
+      level: level.toUpperCase() as McpServerLogEntry['level'],
       message,
-      data: args.length > 0 ? args : undefined
+      ...(detail !== undefined ? { detail: describeDetail(detail) } : {}),
     }
-    
-    this.recentLogs.push(logEntry)
-    
-    // Keep only recent logs
-    if (this.recentLogs.length > this.MAX_LOGS) {
-      this.recentLogs = this.recentLogs.slice(-this.MAX_LOGS)
+    this.recentLogs.push(entry)
+    if (this.recentLogs.length > MAX_LOGS) {
+      this.recentLogs = this.recentLogs.slice(-MAX_LOGS)
     }
-    
-    if (!this.config.enableLogging) return
-    
-    const levels = ['debug', 'info', 'warn', 'error']
-    const configLevel = levels.indexOf(this.config.logLevel)
-    const messageLevel = levels.indexOf(level)
-    
-    if (messageLevel >= configLevel) {
-      console.log(`[MCP Server ${timestamp}] [${level.toUpperCase()}] ${message}`, ...args)
-    }
+    console.log(`[MCP Server ${entry.timestamp}] [${entry.level}] ${message}${entry.detail ? ` - ${entry.detail}` : ''}`)
   }
 
-  private checkRateLimit(ip: string): boolean {
+  private checkRateLimit(ip: string): { allowed: boolean; retryAfter: number } {
     const now = Date.now()
     const limit = this.requestCounts.get(ip)
-    
-    if (!limit || limit.resetTime < now) {
-      // Reset rate limit window
-      this.requestCounts.set(ip, {
-        count: 1,
-        resetTime: now + 60000 // 1 minute window
-      })
-      return true
+
+    if (!limit || limit.resetTime <= now) {
+      this.requestCounts.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS })
+      return { allowed: true, retryAfter: 0 }
     }
-    
     if (limit.count >= this.config.rateLimit) {
-      return false
+      return { allowed: false, retryAfter: Math.max(1, Math.ceil((limit.resetTime - now) / 1000)) }
     }
-    
     limit.count++
-    return true
+    return { allowed: true, retryAfter: 0 }
   }
 
-  private sendCorsHeaders(res: ServerResponse) {
-    if (this.config.enableCors) {
-      res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  private pruneRateLimits() {
+    const now = Date.now()
+    for (const [ip, limit] of this.requestCounts) {
+      if (limit.resetTime <= now) this.requestCounts.delete(ip)
     }
   }
 
-  private sendJsonResponse(res: ServerResponse, statusCode: number, data: any) {
-    // Track errors (4xx and 5xx status codes)
-    if (statusCode >= 400) {
-      this.totalErrors++
-    }
-    
-    this.sendCorsHeaders(res)
-    res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+  // Cross-origin browser access only makes sense with a key: without authentication, any web page
+  // open in the browser could read the exposed prompts
+  private get corsEnabled() {
+    return this.config.enableCors && this.config.enableAuth && this.config.apiKey.length > 0
+  }
+
+  private applyCorsHeaders(res: ServerResponse) {
+    if (!this.corsEnabled) return
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Protocol-Version, Mcp-Session-Id')
+    res.setHeader('Access-Control-Expose-Headers', 'Retry-After')
+    res.setHeader('Access-Control-Max-Age', '600')
+  }
+
+  private sendJson(res: ServerResponse, statusCode: number, data: unknown, headers: Record<string, string> = {}) {
+    if (res.headersSent || res.writableEnded) return
+    if (statusCode >= 500) this.totalErrors++
+    this.applyCorsHeaders(res)
+    res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', ...headers })
     res.end(JSON.stringify(data))
   }
 
-  private authenticateRequest(req: IncomingMessage): boolean {
-    if (!this.config.enableAuth) return true
-    
-    const authHeader = req.headers['authorization']
-    if (!authHeader) return false
-    
-    const [type, token] = authHeader.split(' ')
-    if (type !== 'Bearer' || token !== this.config.apiKey) {
+  private sendError(res: ServerResponse, statusCode: number, error: string, message: string, headers?: Record<string, string>) {
+    this.sendJson(res, statusCode, { error, message }, headers)
+  }
+
+  // DNS rebinding protection: a page on evil.example resolved to 127.0.0.1 still sends its own Host
+  private isAllowedHost(host: string | undefined): boolean {
+    if (!host) return true
+    try {
+      const url = new URL(`http://${host}`)
+      return isLocalHostname(url.hostname) && (url.port === '' || Number(url.port) === this.listeningPort)
+    } catch {
       return false
     }
-    
-    return true
   }
 
-  private getPromptById(promptId: number): Promise<any> {
-    return new Promise((resolve, reject) => {
-      try {
-        const query = `
-          SELECT p.*, c.name as category_name, c.color as category_color
-          FROM prompts p
-          LEFT JOIN categories c ON p.category_id = c.id
-          WHERE p.id = ?
-        `
-        this.db.get(query, [promptId], (err, row) => {
-          if (err) {
-            this.log('error', 'Database error getting prompt:', { promptId, error: err.message })
-            reject(err)
-          } else {
-            resolve(row)
-          }
-        })
-      } catch (error) {
-        this.log('error', 'Failed to get prompt from database:', error)
-        reject(error)
+  private isAllowedOrigin(origin: string | undefined): boolean {
+    if (!origin || this.corsEnabled) return true
+    try {
+      return isLocalHostname(new URL(origin).hostname)
+    } catch {
+      return false
+    }
+  }
+
+  private isAuthorized(req: IncomingMessage): boolean {
+    if (!this.config.enableAuth) return true
+    const expected = this.config.apiKey
+    // Never accept an empty key (start() also refuses to run with auth enabled and no key)
+    if (!expected) return false
+    const header = req.headers['authorization']
+    if (typeof header !== 'string') return false
+    const match = /^Bearer (.+)$/i.exec(header)
+    if (!match || !match[1]) return false
+    return safeEqual(match[1], expected)
+  }
+
+  // Resolves with the body, or null when the request was aborted or too large (already answered)
+  private readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+    return new Promise((resolve) => {
+      const chunks: Buffer[] = []
+      let size = 0
+      let tooLarge = false
+      let settled = false
+      const reject413 = () => {
+        settled = true
+        this.sendError(res, 413, 'Corpo grande demais', 'O corpo da requisição deve ter no máximo 1 MB')
+        resolve(null)
       }
-    })
-  }
+      // Node closes the connection when the response ends before the request body arrives, so the
+      // 413 is sent after the body was read and discarded, up to a cap (then the client is cut off)
+      const discardCap = MAX_BODY_BYTES * 8
+      const declared = Number(req.headers['content-length'])
+      if (Number.isFinite(declared) && declared > discardCap) {
+        reject413()
+        return
+      }
+      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) tooLarge = true
 
-  private getAllExposedPrompts(): Promise<any[]> {
-    return new Promise((resolve, reject) => {
-      try {
-        const promptIds = Array.from(this.exposedPrompts.values())
-        if (promptIds.length === 0) {
-          resolve([])
+      req.on('data', (chunk: Buffer) => {
+        if (settled) return
+        size += chunk.length
+        if (tooLarge || size > MAX_BODY_BYTES) {
+          tooLarge = true
+          chunks.length = 0
+          if (size > discardCap) reject413()
           return
         }
-        
-        const placeholders = promptIds.map(() => '?').join(',')
-        const query = `
-          SELECT p.*, c.name as category_name, c.color as category_color
-          FROM prompts p
-          LEFT JOIN categories c ON p.category_id = c.id
-          WHERE p.id IN (${placeholders})
-        `
-        
-        this.db.all(query, promptIds, (err, rows) => {
-          if (err) {
-            this.log('error', 'Failed to get exposed prompts from database:', err)
-            resolve([])
-          } else {
-            resolve(rows || [])
-          }
-        })
-      } catch (error) {
-        this.log('error', 'Failed to get prompts from database:', error)
-        resolve([])
-      }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        if (settled) return
+        if (tooLarge) {
+          reject413()
+          return
+        }
+        settled = true
+        resolve(Buffer.concat(chunks).toString('utf8'))
+      })
+      req.on('close', () => {
+        if (settled) return
+        settled = true
+        resolve(null)
+      })
     })
+  }
+
+  private async loadExposedEntries(): Promise<ExposedEntry[]> {
+    if (this.exposedPrompts.size === 0) return []
+    const generation = this.exposureGeneration
+    const prompts = await getAllPrompts(this.db)
+    const byId = new Map(prompts.map((prompt) => [prompt.id, prompt]))
+    if (generation === this.exposureGeneration) this.dropMissingPrompts(byId)
+    // Every prompt counts, exposed or not, so exposing or hiding one never renames another
+    const slugCounts = new Map<string, number>()
+    for (const prompt of prompts) {
+      const slug = promptSlug(prompt.title)
+      slugCounts.set(slug, (slugCounts.get(slug) ?? 0) + 1)
+    }
+    return [...this.exposedPrompts.entries()]
+      .map(([hash, id]) => ({ hash, prompt: byId.get(id) }))
+      .filter((entry): entry is { hash: string; prompt: Prompt } => entry.prompt !== undefined)
+      .sort((a, b) => a.prompt.id - b.prompt.id)
+      .map(({ hash, prompt }) => ({
+        hash,
+        name: mcpPromptName(prompt, slugCounts),
+        prompt,
+        variables: extractVariables(prompt.content),
+      }))
+  }
+
+  private async findEntry(nameOrHash: string): Promise<ExposedEntry | undefined> {
+    const entries = await this.loadExposedEntries()
+    return entries.find((entry) => entry.name === nameOrHash) ?? entries.find((entry) => entry.hash === nameOrHash)
+  }
+
+  private restSummary(entry: ExposedEntry) {
+    return {
+      id: entry.hash,
+      name: entry.name,
+      title: entry.prompt.title,
+      description: entry.prompt.description,
+      category: entry.prompt.category_name ?? null,
+      tags: entry.prompt.tags,
+      variables: entry.variables,
+      endpoint: `/prompts/${entry.hash}`,
+    }
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse) {
-    const ip = req.socket.remoteAddress || 'unknown'
-    
-    // Track metrics
     this.totalRequests++
-    
-    // Log request
-    this.log('info', `${req.method} ${req.url} from ${ip}`)
-    
-    // Track connection
-    this.activeConnections++
-    
-    // Clean up connection count when response finishes
-    res.on('finish', () => {
-      this.activeConnections--
-    })
-    
-    // Handle OPTIONS for CORS
-    if (req.method === 'OPTIONS') {
-      this.sendCorsHeaders(res)
+    const method = req.method || 'GET'
+    let pathname = '/'
+    try {
+      pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname
+    } catch {
+      // Keep "/" for a malformed URL: it ends in 404
+    }
+    if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1)
+    this.log('info', `${method} ${pathname}`)
+
+    if (!this.isAllowedHost(req.headers.host)) {
+      this.sendError(res, 403, 'Acesso negado', 'Host não permitido. Use http://127.0.0.1')
+      return
+    }
+    if (!this.isAllowedOrigin(req.headers.origin)) {
+      this.sendError(res, 403, 'Acesso negado', 'Origem não permitida. Para aceitar requisições de navegadores, ative o CORS e a autenticação')
+      return
+    }
+
+    if (method === 'OPTIONS') {
+      this.applyCorsHeaders(res)
       res.writeHead(204)
       res.end()
       return
     }
-    
-    // Check rate limit
-    if (!this.checkRateLimit(ip)) {
-      this.sendJsonResponse(res, 429, {
-        error: 'Rate limit exceeded',
-        message: `Maximum ${this.config.rateLimit} requests per minute`
-      })
+
+    const ip = req.socket.remoteAddress || 'unknown'
+    const limit = this.checkRateLimit(ip)
+    if (!limit.allowed) {
+      this.log('warn', `Limite de ${this.config.rateLimit} requisições por minuto atingido`)
+      this.sendError(res, 429, 'Limite de requisições excedido',
+        `Máximo de ${this.config.rateLimit} requisições por minuto. Tente novamente em ${limit.retryAfter} s.`,
+        { 'Retry-After': String(limit.retryAfter) })
       return
     }
-    
-    // Check authentication
-    if (!this.authenticateRequest(req)) {
-      this.sendJsonResponse(res, 401, {
-        error: 'Unauthorized',
-        message: 'Invalid or missing API key'
-      })
-      return
-    }
-    
-    // Parse URL
-    const parsedUrl = parse(req.url || '', true)
-    const pathname = parsedUrl.pathname || ''
-    
-    // Route: GET /prompts
-    if (pathname === '/prompts' && req.method === 'GET') {
-      this.getAllExposedPrompts()
-        .then(prompts => {
-          const response = []
-          
-          for (const p of prompts) {
-            const hashEntry = Array.from(this.exposedPrompts.entries()).find(([hash, id]) => id === p.id)
-            const hash = hashEntry?.[0]
-            
-            if (!hash) {
-              this.log('warn', `No hash found for exposed prompt ID: ${p.id}`)
-              continue
-            }
-            
-            response.push({
-              id: hash,
-              title: p.title,
-              description: p.description,
-              category: p.category_name,
-              tags: p.tags ? JSON.parse(p.tags) : [],
-              endpoint: `/prompts/${hash}`
-            })
-          }
-          
-          this.sendJsonResponse(res, 200, {
-            prompts: response,
-            count: response.length
-          })
-        })
-        .catch(error => {
-          this.log('error', 'Error getting exposed prompts list:', error)
-          this.sendJsonResponse(res, 500, {
-            error: 'Internal server error',
-            message: 'Failed to retrieve exposed prompts'
-          })
-        })
-      return
-    }
-    
-    // Route: GET /prompts/:hash
-    const promptMatch = pathname.match(/^\/prompts\/([a-zA-Z0-9]+)$/)
-    if (promptMatch && req.method === 'GET') {
-      const hash = promptMatch[1]
-      const promptId = this.exposedPrompts.get(hash)
-      
-      if (!promptId) {
-        this.sendJsonResponse(res, 404, {
-          error: 'Not found',
-          message: 'Prompt not found or not exposed'
-        })
+
+    // Health check without authentication, and without any detail about the server
+    if (pathname === '/health') {
+      if (method !== 'GET') {
+        this.sendError(res, 405, 'Método não permitido', 'Use GET', { Allow: 'GET' })
         return
       }
-      
-      this.getPromptById(promptId)
-        .then(prompt => {
-          if (!prompt) {
-            this.sendJsonResponse(res, 404, {
-              error: 'Not found',
-              message: 'Prompt not found'
-            })
-            return
-          }
-          
-          const response = {
-            id: hash,
-            title: prompt.title || 'Untitled',
-            description: prompt.description || '',
-            content: prompt.content || '',
-            category: prompt.category_name || null,
-            tags: prompt.tags ? JSON.parse(prompt.tags) : [],
-            metadata: {
-              created_at: prompt.created_at,
-              updated_at: prompt.updated_at,
-              is_favorite: prompt.is_favorite
-            }
-          }
-          
-          this.sendJsonResponse(res, 200, response)
-        })
-        .catch(error => {
-          console.error('MCP Server: Error getting prompt:', error)
-          this.sendJsonResponse(res, 500, {
-            error: 'Internal server error',
-            message: 'Failed to retrieve prompt'
-          })
-        })
+      this.sendJson(res, 200, { status: 'ok' })
       return
     }
-    
-    // Route: POST /prompts/:hash/execute
-    const executeMatch = pathname.match(/^\/prompts\/([a-zA-Z0-9]+)\/execute$/)
-    if (executeMatch && req.method === 'POST') {
-      const hash = executeMatch[1]
-      const promptId = this.exposedPrompts.get(hash)
-      
-      if (!promptId) {
-        this.sendJsonResponse(res, 404, {
-          error: 'Not found',
-          message: 'Prompt not found or not exposed'
-        })
-        return
+
+    if (!this.isAuthorized(req)) {
+      this.log('warn', `Requisição recusada: chave de API inválida ou ausente (${method} ${pathname})`)
+      this.sendError(res, 401, 'Não autorizado', 'Chave de API inválida ou ausente. Envie o cabeçalho "Authorization: Bearer SUA_CHAVE".',
+        { 'WWW-Authenticate': 'Bearer realm="prompt-studio"' })
+      return
+    }
+
+    const handle = async () => {
+      if (pathname === '/mcp') return this.handleMcp(req, res, method)
+
+      if (pathname === '/prompts') {
+        if (method !== 'GET') return this.sendError(res, 405, 'Método não permitido', 'Use GET', { Allow: 'GET' })
+        const entries = await this.loadExposedEntries()
+        return this.sendJson(res, 200, { prompts: entries.map((entry) => this.restSummary(entry)), count: entries.length })
       }
-      
-      // Collect POST data
-      let body = ''
-      req.on('data', chunk => {
-        body += chunk.toString()
-      })
-      
-      req.on('end', () => {
-        this.getPromptById(promptId)
-          .then(prompt => {
-            if (!prompt) {
-              this.sendJsonResponse(res, 404, {
-                error: 'Not found',
-                message: 'Prompt not found'
-              })
-              return
-            }
-            
-            try {
-              const params = body ? JSON.parse(body) : {}
-              
-              // Process prompt with parameters
-              let processedContent = prompt.content
-              if (params.variables) {
-                Object.entries(params.variables).forEach(([key, value]) => {
-                  processedContent = processedContent.replace(
-                    new RegExp(`{{${key}}}`, 'g'),
-                    String(value)
-                  )
-                })
-              }
-              
-              this.sendJsonResponse(res, 200, {
-                prompt: processedContent,
-                metadata: {
-                  title: prompt.title,
-                  description: prompt.description,
-                  parameters_applied: params.variables || {}
-                }
-              })
-            } catch (error) {
-              this.sendJsonResponse(res, 400, {
-                error: 'Bad request',
-                message: 'Invalid JSON in request body'
-              })
-            }
+
+      const promptMatch = /^\/prompts\/([A-Za-z0-9]{1,128})(\/execute)?$/.exec(pathname)
+      if (promptMatch) {
+        const hash = promptMatch[1] ?? ''
+        const isExecute = Boolean(promptMatch[2])
+        const expectedMethod = isExecute ? 'POST' : 'GET'
+        if (method !== expectedMethod) {
+          return this.sendError(res, 405, 'Método não permitido', `Use ${expectedMethod}`, { Allow: expectedMethod })
+        }
+        const entry = this.exposedPrompts.has(hash)
+          ? (await this.loadExposedEntries()).find((item) => item.hash === hash)
+          : undefined
+
+        if (!isExecute) {
+          if (!entry) return this.sendError(res, 404, 'Não encontrado', 'Prompt não encontrado ou não exposto')
+          const { prompt } = entry
+          return this.sendJson(res, 200, {
+            ...this.restSummary(entry),
+            content: prompt.content,
+            metadata: { created_at: prompt.created_at, updated_at: prompt.updated_at, is_favorite: prompt.is_favorite },
           })
-          .catch(error => {
-            console.error('MCP Server: Error getting prompt for execute:', error)
-            this.sendJsonResponse(res, 500, {
-              error: 'Internal server error',
-              message: 'Failed to retrieve prompt'
-            })
-          })
-      })
-      return
+        }
+
+        const body = await this.readBody(req, res)
+        if (body === null) return
+        if (!entry) return this.sendError(res, 404, 'Não encontrado', 'Prompt não encontrado ou não exposto')
+        let params: unknown = {}
+        try {
+          params = body.trim() ? JSON.parse(body) : {}
+        } catch {
+          return this.sendError(res, 400, 'Requisição inválida', 'JSON inválido no corpo da requisição')
+        }
+        const variables = parseVariables(isPlainObject(params) ? params.variables : undefined)
+        if (typeof variables === 'string') return this.sendError(res, 400, 'Requisição inválida', variables)
+        return this.sendJson(res, 200, {
+          prompt: substituteVariables(entry.prompt.content, variables),
+          metadata: {
+            title: entry.prompt.title,
+            description: entry.prompt.description,
+            parameters_applied: Object.fromEntries(variables),
+          },
+        })
+      }
+
+      return this.sendError(res, 404, 'Não encontrado', 'Endpoint não encontrado')
     }
-    
-    // Route: GET /health
-    if (pathname === '/health' && req.method === 'GET') {
-      this.sendJsonResponse(res, 200, {
-        status: 'healthy',
-        server: 'Prompt Studio MCP Server',
-        uptime: process.uptime(),
-        exposedPrompts: this.exposedPrompts.size
-      })
-      return
-    }
-    
-    // 404 for unknown routes
-    this.sendJsonResponse(res, 404, {
-      error: 'Not found',
-      message: 'Endpoint not found'
+
+    handle().catch((error) => {
+      this.log('error', `Erro ao processar ${method} ${pathname}`, error)
+      this.sendError(res, 500, 'Erro interno do servidor', 'Não foi possível processar a requisição')
     })
   }
+
+  // ---- MCP (JSON-RPC 2.0 over Streamable HTTP, stateless) ----
+
+  private async handleMcp(req: IncomingMessage, res: ServerResponse, method: string) {
+    if (method !== 'POST') {
+      // Stateless server: no SSE stream (GET) and no session to delete (DELETE)
+      this.sendJson(res, 405, {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32000, message: 'Método não permitido: este servidor MCP aceita apenas POST' },
+      }, { Allow: 'POST' })
+      return
+    }
+
+    const protocolHeader = req.headers['mcp-protocol-version']
+    if (typeof protocolHeader === 'string' && !(MCP_PROTOCOL_VERSIONS as readonly string[]).includes(protocolHeader)) {
+      this.sendJson(res, 400, {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32000, message: `Versão do protocolo MCP não suportada: ${protocolHeader.slice(0, 40)}` },
+      })
+      return
+    }
+
+    const body = await this.readBody(req, res)
+    if (body === null) return
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(body)
+    } catch {
+      this.sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: RPC_PARSE_ERROR, message: 'JSON inválido' } })
+      return
+    }
+
+    const isBatch = Array.isArray(payload)
+    const messages: unknown[] = isBatch ? (payload as unknown[]) : [payload]
+    if (messages.length === 0) {
+      this.sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: RPC_INVALID_REQUEST, message: 'Requisição inválida' } })
+      return
+    }
+
+    const responses: JsonRpcResponse[] = []
+    for (const message of messages) {
+      const response = await this.handleRpcMessage(message)
+      if (response) responses.push(response)
+    }
+
+    // Only notifications or responses: accepted, no body
+    if (responses.length === 0) {
+      if (res.headersSent) return
+      this.applyCorsHeaders(res)
+      res.writeHead(202)
+      res.end()
+      return
+    }
+    this.sendJson(res, 200, isBatch ? responses : responses[0])
+  }
+
+  private async handleRpcMessage(message: unknown): Promise<JsonRpcResponse | null> {
+    if (!isPlainObject(message) || message.jsonrpc !== '2.0') {
+      return { jsonrpc: '2.0', id: null, error: { code: RPC_INVALID_REQUEST, message: 'Requisição inválida' } }
+    }
+    if (typeof message.method !== 'string') {
+      // A response from the client (this server never sends requests to clients)
+      if ('result' in message || 'error' in message) return null
+      return { jsonrpc: '2.0', id: null, error: { code: RPC_INVALID_REQUEST, message: 'Requisição inválida' } }
+    }
+    // Notifications (notifications/initialized, notifications/cancelled...) need no answer
+    if (!('id' in message)) return null
+
+    const id = message.id
+    if (typeof id !== 'string' && typeof id !== 'number') {
+      return { jsonrpc: '2.0', id: null, error: { code: RPC_INVALID_REQUEST, message: 'O campo "id" deve ser texto ou número' } }
+    }
+
+    try {
+      const result = await this.dispatchRpc(message.method, message.params)
+      return { jsonrpc: '2.0', id, result }
+    } catch (error) {
+      if (error instanceof RpcError) {
+        return { jsonrpc: '2.0', id, error: { code: error.code, message: error.message } }
+      }
+      this.totalErrors++
+      this.log('error', `Erro ao processar o método MCP ${message.method}`, error)
+      return { jsonrpc: '2.0', id, error: { code: RPC_INTERNAL_ERROR, message: 'Erro interno do servidor' } }
+    }
+  }
+
+  private async dispatchRpc(method: string, params: unknown): Promise<unknown> {
+    const args = isPlainObject(params) ? params : {}
+
+    switch (method) {
+      case 'initialize': {
+        const requested = typeof args.protocolVersion === 'string' ? args.protocolVersion : ''
+        const protocolVersion = (MCP_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+          ? requested
+          : LATEST_PROTOCOL_VERSION
+        const clientInfo = isPlainObject(args.clientInfo) ? args.clientInfo : {}
+        const clientName = typeof clientInfo.name === 'string' ? clientInfo.name.slice(0, 80) : 'desconhecido'
+        this.log('info', `Cliente MCP conectado: ${clientName} (protocolo ${protocolVersion})`)
+        return {
+          protocolVersion,
+          capabilities: {
+            prompts: { listChanged: false },
+            tools: { listChanged: false },
+          },
+          serverInfo: { name: 'prompt-studio', title: this.config.name, version: SERVER_VERSION },
+          instructions:
+            'Biblioteca de prompts do Prompt Studio. Liste os prompts com prompts/list e obtenha um deles com ' +
+            `prompts/get (ou com a ferramenta ${MCP_TOOL_NAME}), informando os valores das variáveis {{...}}.`,
+        }
+      }
+
+      case 'ping':
+        return {}
+
+      case 'prompts/list': {
+        const entries = await this.loadExposedEntries()
+        return {
+          prompts: entries.map((entry) => ({
+            name: entry.name,
+            title: entry.prompt.title,
+            ...(entry.prompt.description ? { description: entry.prompt.description } : {}),
+            arguments: entry.variables.map((variable) => ({
+              name: variable,
+              description: `Valor para {{${variable}}}`,
+              required: false,
+            })),
+          })),
+        }
+      }
+
+      case 'prompts/get': {
+        if (typeof args.name !== 'string' || !args.name) {
+          throw new RpcError(RPC_INVALID_PARAMS, 'Informe o nome do prompt ("name")')
+        }
+        const entry = await this.findEntry(args.name)
+        if (!entry) throw new RpcError(RPC_INVALID_PARAMS, `Prompt não encontrado: ${args.name.slice(0, 80)}`)
+        const variables = parseVariables(args.arguments)
+        if (typeof variables === 'string') throw new RpcError(RPC_INVALID_PARAMS, variables)
+        this.log('info', `Prompt obtido via MCP: ${entry.name}`)
+        return {
+          ...(entry.prompt.description ? { description: entry.prompt.description } : {}),
+          messages: [
+            { role: 'user', content: { type: 'text', text: substituteVariables(entry.prompt.content, variables) } },
+          ],
+        }
+      }
+
+      case 'tools/list': {
+        const entries = await this.loadExposedEntries()
+        const available = entries.slice(0, 50).map((entry) => `"${entry.name}" (${entry.prompt.title})`).join(', ')
+        return {
+          tools: [
+            {
+              name: MCP_TOOL_NAME,
+              title: 'Obter prompt',
+              description:
+                'Obtém o texto de um prompt da biblioteca do Prompt Studio, com as variáveis {{...}} substituídas ' +
+                'pelos valores informados. Informe "nome" ou "hash". ' +
+                (available ? `Prompts disponíveis: ${available}.` : 'Nenhum prompt está exposto no momento.'),
+              inputSchema: {
+                type: 'object',
+                properties: {
+                  nome: { type: 'string', description: 'Nome do prompt (como em prompts/list)' },
+                  hash: { type: 'string', description: 'Hash do endpoint do prompt (alternativa ao nome)' },
+                  variaveis: {
+                    type: 'object',
+                    description: 'Valores das variáveis, por exemplo { "tema": "vendas" }',
+                    additionalProperties: { type: 'string' },
+                  },
+                },
+              },
+            },
+          ],
+        }
+      }
+
+      case 'tools/call': {
+        if (args.name !== MCP_TOOL_NAME) {
+          throw new RpcError(RPC_INVALID_PARAMS, `Ferramenta desconhecida: ${String(args.name).slice(0, 80)}`)
+        }
+        const input = isPlainObject(args.arguments) ? args.arguments : {}
+        const toolError = (text: string) => ({ content: [{ type: 'text', text }], isError: true })
+        const key = typeof input.nome === 'string' && input.nome.trim()
+          ? input.nome.trim()
+          : typeof input.hash === 'string' && input.hash.trim() ? input.hash.trim() : ''
+        if (!key) return toolError('Informe "nome" ou "hash" do prompt.')
+        const entry = await this.findEntry(key)
+        if (!entry) return toolError(`Prompt não encontrado ou não exposto: ${key.slice(0, 80)}`)
+        const variables = parseVariables(input.variaveis)
+        if (typeof variables === 'string') return toolError(variables)
+        this.log('info', `Ferramenta ${MCP_TOOL_NAME} usada: ${entry.name}`)
+        return { content: [{ type: 'text', text: substituteVariables(entry.prompt.content, variables) }] }
+      }
+
+      default:
+        throw new RpcError(RPC_METHOD_NOT_FOUND, `Método não encontrado: ${method.slice(0, 80)}`)
+    }
+  }
+
+  // ---- Lifecycle ----
 
   start(): Promise<{ success: boolean; message: string; port?: number }> {
-    return new Promise((resolve) => {
-      if (this.server) {
-        resolve({
-          success: false,
-          message: 'Server is already running'
-        })
-        return
+    if (this.startPromise) return this.startPromise
+    if (this.server) {
+      return Promise.resolve({ success: false, message: 'O servidor já está em execução' })
+    }
+
+    const port = Number(this.config.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      const message = 'Porta inválida. Use um número inteiro entre 1 e 65535.'
+      this.log('error', message)
+      return Promise.resolve({ success: false, message })
+    }
+    if (this.config.enableAuth && !this.config.apiKey) {
+      const message = 'A autenticação está ativada, mas nenhuma chave de API foi definida. Gere ou digite uma chave na aba Configuração do servidor MCP.'
+      this.log('error', message)
+      return Promise.resolve({ success: false, message })
+    }
+
+    this.startPromise = new Promise((resolve) => {
+      const server = createServer((req, res) => this.handleRequest(req, res))
+      server.maxConnections = this.config.maxConnections
+      server.requestTimeout = 30_000
+      server.headersTimeout = 15_000
+      server.on('connection', (socket: Socket) => {
+        this.sockets.add(socket)
+        socket.once('close', () => this.sockets.delete(socket))
+      })
+      server.on('drop', () => {
+        this.log('warn', `Conexão recusada: limite de ${this.config.maxConnections} conexões simultâneas atingido`)
+      })
+
+      const onListenError = (error: NodeJS.ErrnoException) => {
+        server.removeListener('listening', onListening)
+        this.server = null
+        this.listening = false
+        this.listeningPort = 0
+        this.startPromise = null
+        const message = error.code === 'EADDRINUSE'
+          ? `A porta ${port} já está em uso por outro programa. Escolha outra porta.`
+          : error.code === 'EACCES'
+            ? `Sem permissão para usar a porta ${port}. Escolha uma porta acima de 1024.`
+            : `Não foi possível iniciar o servidor: ${error.message}`
+        this.log('error', message, error)
+        resolve({ success: false, message })
       }
-      
-      try {
-        this.server = createServer((req, res) => this.handleRequest(req, res))
-        
-        this.server.on('error', (error: any) => {
-          this.log('error', 'Server error:', error)
-          if (error.code === 'EADDRINUSE') {
-            resolve({
-              success: false,
-              message: `Port ${this.config.port} is already in use`
-            })
-          } else {
-            resolve({
-              success: false,
-              message: `Failed to start server: ${error.message}`
-            })
-          }
-          this.server = null
-        })
-        
-        this.server.listen(this.config.port, this.config.host, () => {
-          this.startTime = Date.now()
-          this.totalRequests = 0
-          this.totalErrors = 0
-          this.activeConnections = 0
-          
-          this.log('info', `MCP Server started on http://${this.config.host}:${this.config.port}`)
-          resolve({
-            success: true,
-            message: 'Server started successfully',
-            port: this.config.port
-          })
-        })
-      } catch (error: any) {
-        this.log('error', 'Failed to create server:', error)
-        resolve({
-          success: false,
-          message: `Failed to create server: ${error.message}`
-        })
+      const onListening = () => {
+        server.removeListener('error', onListenError)
+        server.on('error', (error) => this.log('error', 'Erro no servidor', error))
+        this.listening = true
+        this.listeningPort = port
+        this.startTime = Date.now()
+        this.totalRequests = 0
+        this.totalErrors = 0
+        this.requestCounts.clear()
+        this.rateLimitCleanup = setInterval(() => this.pruneRateLimits(), RATE_LIMIT_WINDOW_MS)
+        ;(this.rateLimitCleanup as { unref?: () => void }).unref?.()
+        this.startPromise = null
+        this.log('info', `Servidor MCP iniciado em http://${MCP_LISTEN_HOST}:${port}`)
+        resolve({ success: true, message: 'Servidor iniciado com sucesso', port })
       }
+
+      server.once('error', onListenError)
+      server.once('listening', onListening)
+      this.server = server
+      server.listen(port, MCP_LISTEN_HOST)
     })
+    return this.startPromise
   }
 
-  stop(): Promise<{ success: boolean; message: string }> {
-    return new Promise((resolve) => {
-      if (!this.server) {
-        resolve({
-          success: false,
-          message: 'Server is not running'
-        })
-        return
+  async stop(): Promise<{ success: boolean; message: string }> {
+    if (this.stopPromise) return this.stopPromise
+    if (this.startPromise) await this.startPromise
+    const server = this.server
+    if (!server) {
+      return { success: false, message: 'O servidor não está em execução' }
+    }
+
+    this.stopPromise = new Promise((resolve) => {
+      let finished = false
+      const finish = () => {
+        if (finished) return
+        finished = true
+        clearTimeout(forceTimer)
+        for (const socket of this.sockets) socket.destroy()
+        this.sockets.clear()
+        if (this.rateLimitCleanup) clearInterval(this.rateLimitCleanup)
+        this.rateLimitCleanup = null
+        this.requestCounts.clear()
+        this.server = null
+        this.listening = false
+        this.listeningPort = 0
+        this.stopPromise = null
+        this.log('info', 'Servidor MCP parado')
+        resolve({ success: true, message: 'Servidor parado com sucesso' })
       }
-      
-      try {
-        this.server.close(() => {
-          this.log('info', 'MCP Server stopped')
-          this.server = null
-          resolve({
-            success: true,
-            message: 'Server stopped successfully'
-          })
-        })
-      } catch (error: any) {
-        this.log('error', 'Failed to stop server:', error)
-        resolve({
-          success: false,
-          message: `Failed to stop server: ${error.message}`
-        })
-      }
+      // A client that keeps a request open must not block "Parar servidor"
+      const forceTimer = setTimeout(finish, STOP_TIMEOUT_MS)
+      server.close(() => finish())
+      server.closeAllConnections()
     })
+    return this.stopPromise
   }
 
   isRunning(): boolean {
-    return this.server !== null
+    return this.server !== null && this.listening
   }
 
-  getStatus() {
-    const uptime = this.isRunning() ? Math.floor((Date.now() - this.startTime) / 1000) : 0
-    
+  getStatus(): McpServerStatus {
+    const running = this.isRunning()
     return {
-      running: this.isRunning(),
-      port: this.isRunning() ? this.config.port : 0,
+      running,
+      port: running ? this.listeningPort : 0,
+      host: MCP_LISTEN_HOST,
       exposedPrompts: this.exposedPrompts.size,
-      connections: this.activeConnections,
-      uptime: uptime,
+      connections: running ? this.sockets.size : 0,
+      uptime: running ? Math.floor((Date.now() - this.startTime) / 1000) : 0,
       requests: this.totalRequests,
       errors: this.totalErrors,
-      logs: this.recentLogs.slice(-10).reverse(), // Get recent 10 logs, newest first
-      config: this.config
+      logs: this.recentLogs.slice().reverse(),
     }
   }
 
   clearLogs() {
     this.recentLogs = []
-    this.log('info', 'Server logs cleared')
   }
 }
 

@@ -1,10 +1,8 @@
-import { useState } from 'react'
-import { Search, Filter, SortAsc, SortDesc, Grid, List, Plus, Settings, X } from 'lucide-react'
+import { Search, Filter, SortAsc, SortDesc, Grid, List, Plus, X, CheckSquare, ListOrdered } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { InfoIcon } from '@/components/ui/info-icon'
 import { AdvancedSearchInput } from '../search/advanced-search-input'
@@ -13,17 +11,34 @@ import { PromptGrid } from '../prompts/prompt-grid'
 import { TestingPanel } from '../testing/testing-panel'
 import { McpServerPanel } from '../mcp/mcp-server-panel'
 import { TemplateList } from '../templates/template-list-simple'
-import { usePromptStore } from '@/stores/usePromptStore'
+import { BulkActionsBar } from '../organization/bulk-actions-bar'
+import { PROMPT_LIST_AREA_ATTRIBUTE, useSelectionShortcuts } from '../organization/use-selection-shortcuts'
+import { getSequenceCategoryForQuery, usePromptStore, type MainTab } from '@/stores/usePromptStore'
 import type { SortOptions } from '@/types'
 
+const SORT_OPTIONS: readonly { value: `${SortOptions['field']}:${SortOptions['direction']}`; label: string; descending: boolean }[] = [
+  { value: 'updated_at:desc', label: 'Editados recentemente', descending: true },
+  { value: 'updated_at:asc', label: 'Editados há mais tempo', descending: false },
+  { value: 'title:asc', label: 'Título (A–Z)', descending: false },
+  { value: 'title:desc', label: 'Título (Z–A)', descending: true },
+  { value: 'created_at:desc', label: 'Criados recentemente', descending: true },
+  { value: 'created_at:asc', label: 'Criados há mais tempo', descending: false },
+  { value: 'usage_count:desc', label: 'Mais usados', descending: true },
+  { value: 'last_used_at:desc', label: 'Usados recentemente', descending: true },
+]
+
+const SEQUENCE_SORT_HINT =
+  'Os passos desta sequência aparecem na ordem definida por você. Arraste os prompts ou use Alt+↑ e Alt+↓ para mudar a ordem; a ordenação volta a valer fora da sequência.'
+
+const MAIN_TABS: readonly MainTab[] = ['prompts', 'templates', 'testing', 'mcp']
+
 export function MainContent() {
-  const [activeTab, setActiveTab] = useState('prompts')
-  
   const {
     getFilteredPrompts,
     searchFilters,
     sortOptions,
     setSearchFilters,
+    clearSearchFilters,
     setSortOptions,
     openPromptEditor,
     openTemplateEditor,
@@ -35,116 +50,128 @@ export function MainContent() {
     setPromptViewMode,
     setTemplateViewMode,
     isPromptEditorOpen,
-    isPromptViewerOpen
+    isPromptViewerOpen,
+    activeMainTab: activeTab,
+    setActiveMainTab,
+    categories,
+    isSelectionMode,
+    setSelectionMode
   } = usePromptStore()
-  
+
   const filteredTemplates = getFilteredTemplates()
 
   const filteredPrompts = getFilteredPrompts()
+
+  // A sequence category is listed in step order: the sort option does not apply while it is shown
+  const sequenceCategory = getSequenceCategoryForQuery(searchFilters.query, categories)
+
+  // Ctrl/Cmd+A selects the filtered prompts, Esc leaves the selection mode
+  useSelectionShortcuts(filteredPrompts, activeTab === 'prompts')
 
   const handleSearch = (query: string) => {
     setSearchFilters({ query })
   }
 
   const handleSortChange = (value: string) => {
-    const [field, direction] = value.split(':') as [keyof Pick<SortOptions, 'field'>['field'], SortOptions['direction']]
+    const [field, direction] = value.split(':') as [SortOptions['field'], SortOptions['direction']]
     setSortOptions({ field, direction })
   }
 
-  const clearFilters = () => {
-    setSearchFilters({
-      query: '',
-      categoryId: null,
-      tags: [],
-      isFavorite: undefined
-    })
+  const handleTabChange = (value: string) => {
+    if (MAIN_TABS.includes(value as MainTab)) {
+      setActiveMainTab(value as MainTab)
+    }
   }
 
-  const hasActiveFilters = Boolean(
-    searchFilters.query ||
-    searchFilters.categoryId ||
-    (searchFilters.tags && searchFilters.tags.length > 0) ||
-    searchFilters.isFavorite !== undefined
-  )
+  // All filters live in the search query
+  const hasActiveFilters = searchFilters.query.trim() !== ''
+
+  const currentViewMode = activeTab === 'prompts' ? promptViewMode : templateViewMode
+  const viewModeLabel = currentViewMode === 'list' ? 'Mostrar em grade' : 'Mostrar em lista'
 
   return (
     <div className="h-full flex flex-col bg-background">
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full flex flex-col">
         {/* Header */}
         <div className="flex-shrink-0 p-4 border-b space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <TabsList>
+          {/* Wraps instead of hiding the buttons when the editor or viewer panel makes this area narrow */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0 max-w-full">
+              <TabsList className="h-auto max-w-full flex-wrap justify-start">
                 <TabsTrigger value="prompts">Prompts</TabsTrigger>
                 <TabsTrigger value="templates">Templates</TabsTrigger>
-                <TabsTrigger value="testing">Testing</TabsTrigger>
-                <TabsTrigger value="mcp">MCP Server</TabsTrigger>
+                <TabsTrigger value="testing">Testes</TabsTrigger>
+                <TabsTrigger value="mcp">Servidor MCP</TabsTrigger>
               </TabsList>
-              
+
               {/* Info icons for each tab */}
               {activeTab === 'prompts' && (
-                <InfoIcon 
+                <InfoIcon
                   title="Prompts"
                   description={
                     <div className="space-y-2">
-                      <p>Create, organize, and manage your AI prompts with advanced features.</p>
-                      <p><strong>Categories:</strong> Organize prompts with color-coded categories for easy identification.</p>
-                      <p><strong>Tags:</strong> Add multiple tags to prompts for flexible organization and filtering.</p>
-                      <p><strong>Advanced Search:</strong> Use syntax like 'tag:AI,Writing' or 'is:favorite' to find prompts quickly.</p>
-                      <p><strong>Favorites:</strong> Mark important prompts as favorites for quick access.</p>
-                      <p><strong>Templates:</strong> Apply pre-made templates to speed up prompt creation.</p>
+                      <p>Crie, organize e gerencie seus prompts de IA.</p>
+                      <p><strong>Categorias:</strong> organize os prompts em categorias identificadas por cores para encontrá-los com facilidade.</p>
+                      <p><strong>Tags:</strong> adicione várias tags aos prompts para organizá-los e filtrá-los com flexibilidade.</p>
+                      <p><strong>Busca avançada:</strong> use 'tag:IA,Escrita', 'categoria:Nome', 'titulo:texto', 'conteudo:texto' ou 'favorito:sim'. A busca ignora maiúsculas e acentos; com várias palavras, mostra os prompts que contêm todas.</p>
+                      <p><strong>Favoritos:</strong> marque os prompts importantes como favoritos para acessá-los rapidamente.</p>
+                      <p><strong>Fixados e mais usados:</strong> fixe prompts no topo de qualquer lista e ordene por "Mais usados" ou "Usados recentemente".</p>
+                      <p><strong>Sequências:</strong> numa categoria marcada como sequência, os prompts viram passos numerados; arraste para reordenar e use "Copiar próximo passo".</p>
+                      <p><strong>Seleção:</strong> use "Selecionar" (ou Ctrl+A) para mover, marcar, exportar ou excluir vários prompts de uma vez.</p>
+                      <p><strong>Templates:</strong> aplique templates prontos para agilizar a criação de prompts.</p>
                     </div>
                   }
                 />
               )}
-              
+
               {activeTab === 'templates' && (
-                <InfoIcon 
+                <InfoIcon
                   title="Templates"
                   description={
                     <div className="space-y-2">
-                      <p>Create reusable templates with variables for quick prompt generation.</p>
-                      <p><strong>Variables:</strong> Use {`{{variableName}}`} syntax in your content to create placeholders that can be filled in when the template is used.</p>
-                      <p><strong>Categories:</strong> Organize templates by assigning them to categories with color-coded labels.</p>
-                      <p><strong>Search:</strong> Find templates by name, content, description, or variable names.</p>
+                      <p>Crie templates reutilizáveis com variáveis para gerar prompts rapidamente.</p>
+                      <p><strong>Variáveis:</strong> use a sintaxe {`{{nomeDaVariavel}}`} no conteúdo para criar campos que serão preenchidos quando o template for usado.</p>
+                      <p><strong>Categorias:</strong> organize os templates atribuindo-os a categorias com rótulos coloridos.</p>
+                      <p><strong>Busca:</strong> encontre templates por nome, conteúdo, descrição ou nomes de variáveis.</p>
                     </div>
                   }
                 />
               )}
-              
+
               {activeTab === 'testing' && (
-                <InfoIcon 
-                  title="Testing"
+                <InfoIcon
+                  title="Testes"
                   description={
                     <div className="space-y-2">
-                      <p>Test your prompts with different AI models and configurations to optimize their performance.</p>
-                      <p><strong>Multi-Model Testing:</strong> Compare how different AI models respond to your prompts.</p>
-                      <p><strong>Parameter Tuning:</strong> Adjust temperature, max tokens, and other parameters to fine-tune responses.</p>
-                      <p><strong>A/B Testing:</strong> Test multiple prompt variations to find the most effective one.</p>
-                      <p><strong>Response Analysis:</strong> Evaluate and compare AI responses to improve your prompts.</p>
+                      <p>Envie um prompt para um modelo de IA (OpenAI e APIs compatíveis ou Anthropic Claude) e veja a resposta.</p>
+                      <p><strong>Configuração:</strong> escolha o provedor e informe o endpoint, a chave de API e o modelo.</p>
+                      <p><strong>Parâmetros:</strong> ajuste a temperatura e o máximo de tokens.</p>
+                      <p><strong>Resultado:</strong> veja a resposta, o tempo de resposta e o uso de tokens.</p>
+                      <p><strong>Histórico:</strong> cada teste fica salvo; reexecute ou compare duas execuções lado a lado.</p>
+                      <p><strong>Comparar modelos:</strong> envie o mesmo prompt para duas configurações ao mesmo tempo.</p>
                     </div>
                   }
                 />
               )}
-              
+
               {activeTab === 'mcp' && (
-                <InfoIcon 
-                  title="MCP Server"
+                <InfoIcon
+                  title="Servidor MCP"
                   description={
                     <div className="space-y-2">
-                      <p>Expose your prompt library as an MCP (Model Context Protocol) server for integration with AI tools.</p>
-                      <p><strong>Server Management:</strong> Start and stop your MCP server with real-time status monitoring.</p>
-                      <p><strong>Prompt Exposure:</strong> Choose which prompts to make available to MCP clients.</p>
-                      <p><strong>Security & Auth:</strong> Configure API keys, rate limiting, and access controls.</p>
-                      <p><strong>Client Integration:</strong> Connect with Claude Desktop and other MCP-compatible applications.</p>
+                      <p>Exponha sua biblioteca de prompts como um servidor MCP (Model Context Protocol) para integrá-la a ferramentas de IA.</p>
+                      <p><strong>Gerenciamento do servidor:</strong> inicie e pare o servidor MCP e acompanhe o status.</p>
+                      <p><strong>Exposição de prompts:</strong> escolha quais prompts ficarão disponíveis para os clientes MCP.</p>
+                      <p><strong>Segurança e autenticação:</strong> configure a chave de API, o limite de requisições e os controles de acesso.</p>
+                      <p><strong>Integração com clientes:</strong> conecte-se ao Claude Desktop, ao Claude Code e a outros aplicativos compatíveis com MCP.</p>
                     </div>
                   }
                 />
               )}
             </div>
-            
+
             {(activeTab === 'prompts' || activeTab === 'templates') && (
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
                 <Button
                   variant="outline"
                   size="sm"
@@ -155,8 +182,10 @@ export function MainContent() {
                       setTemplateViewMode(templateViewMode === 'list' ? 'grid' : 'list')
                     }
                   }}
+                  aria-label={viewModeLabel}
+                  title={viewModeLabel}
                 >
-                  {(activeTab === 'prompts' ? promptViewMode : templateViewMode) === 'list' ? (
+                  {currentViewMode === 'list' ? (
                     <Grid className="h-4 w-4" />
                   ) : (
                     <List className="h-4 w-4" />
@@ -173,7 +202,7 @@ export function MainContent() {
                   }}
                 >
                   <Plus className="h-4 w-4 mr-2" />
-                  {activeTab === 'prompts' ? 'New Prompt' : 'New Template'}
+                  {activeTab === 'prompts' ? 'Novo prompt' : 'Novo template'}
                 </Button>
               </div>
             )}
@@ -181,64 +210,46 @@ export function MainContent() {
 
           {activeTab === 'prompts' && (
             <div className="space-y-3">
-              {/* Search and Controls Row */}
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
+              {/* Search and Controls Row: the controls move below the search when there is no room */}
+              <div className="flex flex-wrap items-start gap-3">
                 {/* Advanced Search */}
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-[12rem]">
                   <AdvancedSearchInput
                     value={searchFilters.query}
                     onChange={handleSearch}
-                    placeholder="Search prompts... (try: tag:AI,Writing or is:favorite)"
+                    placeholder="Buscar prompts (ex.: tag:IA)"
                   />
                 </div>
 
                 {/* Sort and Filter Controls */}
-                <div className="flex items-center gap-3 flex-shrink-0 lg:self-start lg:mt-0">
-                  {/* Sort */}
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  {/* Sort (disabled while a sequence is shown: its steps have their own order) */}
                   <Select
                     value={`${sortOptions.field}:${sortOptions.direction}`}
                     onValueChange={handleSortChange}
+                    disabled={sequenceCategory !== null}
                   >
-                    <SelectTrigger className="w-40 h-10">
+                    <SelectTrigger
+                      className="w-60 h-10"
+                      aria-label="Ordenar por"
+                      aria-describedby={sequenceCategory ? 'sequence-sort-hint' : undefined}
+                      title={sequenceCategory ? SEQUENCE_SORT_HINT : undefined}
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="updated_at:desc">
-                        <div className="flex items-center">
-                          <SortDesc className="h-4 w-4 mr-2" />
-                          Last Modified
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="updated_at:asc">
-                        <div className="flex items-center">
-                          <SortAsc className="h-4 w-4 mr-2" />
-                          Oldest First
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="title:asc">
-                        <div className="flex items-center">
-                          <SortAsc className="h-4 w-4 mr-2" />
-                          Title A-Z
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="title:desc">
-                        <div className="flex items-center">
-                          <SortDesc className="h-4 w-4 mr-2" />
-                          Title Z-A
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="created_at:desc">
-                        <div className="flex items-center">
-                          <SortDesc className="h-4 w-4 mr-2" />
-                          Newest
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="created_at:asc">
-                        <div className="flex items-center">
-                          <SortAsc className="h-4 w-4 mr-2" />
-                          Oldest
-                        </div>
-                      </SelectItem>
+                      {SORT_OPTIONS.map(option => (
+                        <SelectItem key={option.value} value={option.value}>
+                          <div className="flex items-center">
+                            {option.descending ? (
+                              <SortDesc className="h-4 w-4 mr-2 shrink-0" />
+                            ) : (
+                              <SortAsc className="h-4 w-4 mr-2 shrink-0" />
+                            )}
+                            {option.label}
+                          </div>
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
 
@@ -247,27 +258,39 @@ export function MainContent() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={clearFilters}
+                      onClick={clearSearchFilters}
                       className="h-10 px-3"
                     >
                       <Filter className="h-4 w-4 mr-2" />
-                      <span className="text-xs">Clear</span>
+                      <span className="text-xs">Limpar</span>
                     </Button>
                   )}
                 </div>
               </div>
+
+              {sequenceCategory && (
+                <p id="sequence-sort-hint" className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <ListOrdered className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>
+                    Ordem da sequência “{sequenceCategory.name}”: o seletor de ordenação fica desativado enquanto ela é exibida.
+                  </span>
+                </p>
+              )}
+
+              {isSelectionMode && <BulkActionsBar visiblePrompts={filteredPrompts} />}
             </div>
           )}
-          
+
           {activeTab === 'templates' && (
             <div className="space-y-3">
               {/* Template Search */}
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
-                <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex-1 min-w-[12rem]">
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
-                      placeholder="Search templates..."
+                      placeholder="Buscar templates..."
+                      aria-label="Buscar templates"
                       value={templateSearchQuery}
                       onChange={(e) => setTemplateSearchQuery(e.target.value)}
                       className="pl-9 pr-9 h-10"
@@ -278,17 +301,19 @@ export function MainContent() {
                         size="sm"
                         onClick={() => setTemplateSearchQuery('')}
                         className="absolute right-1 top-1/2 transform -translate-y-1/2 h-6 w-6 p-0"
+                        aria-label="Limpar busca"
+                        title="Limpar busca"
                       >
                         <X className="h-3 w-3" />
                       </Button>
                     )}
                   </div>
                 </div>
-                
+
                 {filteredTemplates.length > 0 && (
-                  <div className="flex items-center text-sm text-muted-foreground lg:self-center lg:mt-0">
+                  <div className="flex items-center text-sm text-muted-foreground">
                     {filteredTemplates.length} template{filteredTemplates.length !== 1 ? 's' : ''}
-                    {templateSearchQuery && ` (filtered)`}
+                    {templateSearchQuery && (filteredTemplates.length !== 1 ? ` (filtrados)` : ` (filtrado)`)}
                   </div>
                 )}
               </div>
@@ -299,7 +324,7 @@ export function MainContent() {
         {/* Content */}
         <div className="flex-1 min-h-0">
           <TabsContent value="prompts" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
-            <div className="flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-hidden" {...{ [PROMPT_LIST_AREA_ATTRIBUTE]: '' }}>
               <ScrollArea className="h-full">
                 <div className="p-4">
                   {filteredPrompts.length === 0 ? (
@@ -309,39 +334,51 @@ export function MainContent() {
                           <Search className="h-8 w-8 text-muted-foreground" />
                         </div>
                       </div>
-                      <h3 className="text-lg font-medium mb-2">No prompts found</h3>
+                      <h3 className="text-lg font-medium mb-2">Nenhum prompt encontrado</h3>
                       <p className="text-muted-foreground mb-6 max-w-md mx-auto">
                         {hasActiveFilters
-                          ? "No prompts match your current filters. Try adjusting your search criteria."
-                          : "Get started by creating your first prompt."
+                          ? "Nenhum prompt corresponde aos filtros atuais. Tente ajustar os critérios de busca."
+                          : "Comece criando seu primeiro prompt."
                         }
                       </p>
-                      <div className="flex items-center justify-center space-x-4">
+                      <div className="flex flex-wrap items-center justify-center gap-4">
                         <Button onClick={() => openPromptEditor()}>
                           <Plus className="h-4 w-4 mr-2" />
-                          Create Prompt
+                          Criar prompt
                         </Button>
                         {hasActiveFilters && (
-                          <Button variant="outline" onClick={clearFilters}>
-                            Clear Filters
+                          <Button variant="outline" onClick={clearSearchFilters}>
+                            Limpar filtros
                           </Button>
                         )}
                       </div>
                     </div>
                   ) : (
                     <>
-                      <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center justify-between gap-2 mb-4">
                         <p className="text-sm text-muted-foreground">
                           {filteredPrompts.length} prompt{filteredPrompts.length !== 1 ? 's' : ''}
-                          {hasActiveFilters && ' (filtered)'}
+                          {hasActiveFilters && (filteredPrompts.length !== 1 ? ' (filtrados)' : ' (filtrado)')}
                         </p>
+                        {!isSelectionMode && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8"
+                            onClick={() => setSelectionMode(true)}
+                            title="Selecionar vários prompts para mover, marcar, exportar ou excluir (Ctrl+A seleciona todos)"
+                          >
+                            <CheckSquare className="h-4 w-4 mr-2" />
+                            Selecionar
+                          </Button>
+                        )}
                       </div>
-                      
+
                       {promptViewMode === 'list' ? (
                         <PromptList prompts={filteredPrompts} />
                       ) : (
-                        <PromptGrid 
-                          prompts={filteredPrompts} 
+                        <PromptGrid
+                          prompts={filteredPrompts}
                           compactMode={isPromptEditorOpen || isPromptViewerOpen}
                         />
                       )}
@@ -353,8 +390,8 @@ export function MainContent() {
           </TabsContent>
 
           <TabsContent value="templates" className="h-full m-0">
-            <TemplateList 
-              viewMode={templateViewMode} 
+            <TemplateList
+              viewMode={templateViewMode}
               filteredTemplates={filteredTemplates}
             />
           </TabsContent>

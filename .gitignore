@@ -1,3 +1,11 @@
 node_modules
 dist
 dist-electron
+
+# Local recovery tools and database backups: personal data, never versioned
+recuperacao/
+*.db
+*.db-wal
+*.db-shm
+
+*.tsbuildinfo

@@ -1,12 +1,18 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Search, X, Tag, Hash, Star, FileText, Palette } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
-import { parseSearchQuery, getSearchSuggestions } from '@/lib/search-parser'
+import {
+  parseSearchQuery,
+  getSearchSuggestions,
+  getFilterRegex,
+  parseTagList,
+  formatTagFilter,
+  normalizeSearchText
+} from '@/lib/search-parser'
 import { usePromptStore } from '@/stores/usePromptStore'
 
 interface AdvancedSearchInputProps {
@@ -16,25 +22,67 @@ interface AdvancedSearchInputProps {
   className?: string
 }
 
-export function AdvancedSearchInput({ 
-  value, 
-  onChange, 
-  placeholder = "Search prompts... (try: tag:AI,Writing or is:favorite)",
-  className 
+// Number of tags offered as quick filters (the most used ones)
+const QUICK_FILTER_TAGS = 3
+
+const tagCollator = new Intl.Collator('pt-BR', { sensitivity: 'base' })
+
+function RemoveFilterButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={onClick}
+      className="ml-1 -mr-1 h-4 w-4 p-0 hover:bg-transparent"
+      aria-label={`Remover filtro ${label}`}
+      title="Remover filtro"
+    >
+      <X className="h-3 w-3" />
+    </Button>
+  )
+}
+
+export function AdvancedSearchInput({
+  value,
+  onChange,
+  placeholder = "Buscar prompts (ex.: tag:IA)",
+  className
 }: AdvancedSearchInputProps) {
-  const { tags, categories } = usePromptStore()
+  const { tags, categories, prompts } = usePromptStore()
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
-  const suggestionsRef = useRef<HTMLDivElement>(null)
 
   const parsedQuery = parseSearchQuery(value)
+
+  // Most used tags first (ties in alphabetical order); tags that differ only in case/accents count as one
+  const popularTags = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const prompt of prompts) {
+      for (const tag of new Set(prompt.tags.map(normalizeSearchText))) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1)
+      }
+    }
+    const seen = new Set<string>()
+    return tags
+      .filter(tag => {
+        const key = normalizeSearchText(tag)
+        if (seen.has(key) || !counts.get(key)) return false
+        seen.add(key)
+        return true
+      })
+      .sort((a, b) =>
+        (counts.get(normalizeSearchText(b)) ?? 0) - (counts.get(normalizeSearchText(a)) ?? 0) ||
+        tagCollator.compare(a, b)
+      )
+      .slice(0, QUICK_FILTER_TAGS)
+  }, [tags, prompts])
 
   useEffect(() => {
     if (value.trim()) {
       const categoryNames = categories.map(c => c.name)
-      const newSuggestions = getSearchSuggestions(value, tags, categoryNames)
+      const newSuggestions = getSearchSuggestions(value, [...tags], categoryNames)
       setSuggestions(newSuggestions)
       setSelectedSuggestion(-1)
     } else {
@@ -43,6 +91,8 @@ export function AdvancedSearchInput({
     }
   }, [value, tags, categories])
 
+  // Suggestions open while typing only: focusing the field again (Ctrl+K closed, Tab) must not
+  // cover the controls below it
   const handleInputChange = (newValue: string) => {
     onChange(newValue)
     setShowSuggestions(newValue.trim().length > 0)
@@ -54,23 +104,25 @@ export function AdvancedSearchInput({
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()
-        setSelectedSuggestion(prev => 
+        setSelectedSuggestion(prev =>
           prev < suggestions.length - 1 ? prev + 1 : 0
         )
         break
       case 'ArrowUp':
         e.preventDefault()
-        setSelectedSuggestion(prev => 
+        setSelectedSuggestion(prev =>
           prev > 0 ? prev - 1 : suggestions.length - 1
         )
         break
-      case 'Enter':
-        if (selectedSuggestion >= 0) {
+      case 'Enter': {
+        const suggestion = suggestions[selectedSuggestion]
+        if (selectedSuggestion >= 0 && suggestion !== undefined) {
           e.preventDefault()
-          onChange(suggestions[selectedSuggestion])
+          onChange(suggestion)
           setShowSuggestions(false)
         }
         break
+      }
       case 'Escape':
         setShowSuggestions(false)
         setSelectedSuggestion(-1)
@@ -98,49 +150,38 @@ export function AdvancedSearchInput({
 
   const removeFilter = (filterType: 'tag' | 'title' | 'content' | 'category' | 'favorite', filterValue?: string) => {
     let newValue = value
-    
+
     switch (filterType) {
       case 'tag':
-        if (filterValue) {
-          // Remove specific tag - handle both quoted and unquoted tags
-          const tagRegex = /tag:("([^"]*)"|([^\s]+))/gi
-          newValue = newValue.replace(tagRegex, (match) => {
-            // Extract the tag list (handle quoted values)
-            const tagMatch = match.match(/tag:("([^"]*)"|([^\s]+))/i)
-            if (!tagMatch) return ''
-            
-            const tagList = tagMatch[2] || tagMatch[3] || tagMatch[1] || ''
-            const tags = tagList.split(',').map(t => t.trim()).filter(t => t && t !== filterValue)
-            
-            if (tags.length === 0) return ''
-            
-            // Format the remaining tags properly
-            const needsQuoting = (tag: string) => tag.includes(' ') || tag.includes(',') || tag.includes('"')
-            const formattedTags = tags.map(tag => needsQuoting(tag) ? `"${tag.replace(/"/g, '\\"')}"` : tag)
-            return `tag:${formattedTags.join(',')}`
+        if (filterValue !== undefined) {
+          // Remove one tag from every tag list, keeping the others (quoted or not)
+          newValue = newValue.replace(getFilterRegex('tag'), (match) => {
+            const tagList = match.slice(match.indexOf(':') + 1)
+            const remainingTags = parseTagList(tagList).filter(t => t !== filterValue)
+            return remainingTags.length === 0 ? '' : formatTagFilter(remainingTags)
           })
         } else {
-          // Remove all tags - handle both quoted and unquoted
-          newValue = newValue.replace(/tag:("([^"]*)"|([^\s]+))/gi, '')
+          newValue = newValue.replace(getFilterRegex('tag'), '')
         }
         break
       case 'title':
-        // Handle both quoted and unquoted title values
-        newValue = newValue.replace(/title:("([^"]*)"|([^\s]+))/gi, '')
+        // Handle both quoted and unquoted title values (titulo:/título:/title:)
+        newValue = newValue.replace(getFilterRegex('title'), '')
         break
       case 'content':
-        // Handle both quoted and unquoted content values
-        newValue = newValue.replace(/content:("([^"]*)"|([^\s]+))/gi, '')
+        // Handle both quoted and unquoted content values (conteudo:/conteúdo:/content:)
+        newValue = newValue.replace(getFilterRegex('content'), '')
         break
       case 'category':
-        // Handle both quoted and unquoted category values
-        newValue = newValue.replace(/category:("([^"]*)"|([^\s]+))/gi, '')
+        // Handle both quoted and unquoted category values (categoria:/category:)
+        newValue = newValue.replace(getFilterRegex('category'), '')
         break
       case 'favorite':
-        newValue = newValue.replace(/is:(not-)?favorite/gi, '')
+        // favorito:sim / favorito:nao / is:favorite / is:not-favorite
+        newValue = newValue.replace(getFilterRegex('favorite'), '')
         break
     }
-    
+
     onChange(newValue.replace(/\s+/g, ' ').trim())
   }
 
@@ -152,10 +193,10 @@ export function AdvancedSearchInput({
           ref={inputRef}
           type="text"
           placeholder={placeholder}
+          aria-label="Buscar prompts"
           value={value}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => setShowSuggestions(value.trim().length > 0 && suggestions.length > 0)}
           onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
           className={cn("pl-9 pr-10", className)}
           data-search-input
@@ -166,6 +207,8 @@ export function AdvancedSearchInput({
             size="sm"
             onClick={handleClear}
             className="absolute right-1 top-1/2 transform -translate-y-1/2 h-6 w-6 p-0 hover:bg-muted"
+            aria-label="Limpar busca"
+            title="Limpar busca"
           >
             <X className="h-3 w-3" />
           </Button>
@@ -175,88 +218,46 @@ export function AdvancedSearchInput({
       {/* Active Filters Display */}
       {(parsedQuery.tags.length > 0 || parsedQuery.title || parsedQuery.content || parsedQuery.category || parsedQuery.isFavorite !== undefined) && (
         <div className="flex flex-wrap gap-1 mt-2">
-          {parsedQuery.tags.map((tag) => (
-            <Badge key={tag} variant="secondary" className="text-xs">
-              <Hash className="h-3 w-3 mr-1" />
-              {tag}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('tag', tag)}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+          {parsedQuery.tags.map((tag, index) => (
+            <Badge key={`${index}-${tag}`} variant="secondary" className="text-xs max-w-full">
+              <Hash className="h-3 w-3 mr-1 shrink-0" />
+              <span className="truncate">{tag}</span>
+              <RemoveFilterButton label={`tag ${tag}`} onClick={() => removeFilter('tag', tag)} />
             </Badge>
           ))}
           {parsedQuery.title && (
-            <Badge variant="secondary" className="text-xs">
-              <FileText className="h-3 w-3 mr-1" />
-              title:{parsedQuery.title}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('title')}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+            <Badge variant="secondary" className="text-xs max-w-full">
+              <FileText className="h-3 w-3 mr-1 shrink-0" />
+              <span className="truncate">titulo:{parsedQuery.title}</span>
+              <RemoveFilterButton label="de título" onClick={() => removeFilter('title')} />
             </Badge>
           )}
           {parsedQuery.content && (
-            <Badge variant="secondary" className="text-xs">
-              <Search className="h-3 w-3 mr-1" />
-              content:{parsedQuery.content}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('content')}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+            <Badge variant="secondary" className="text-xs max-w-full">
+              <Search className="h-3 w-3 mr-1 shrink-0" />
+              <span className="truncate">conteudo:{parsedQuery.content}</span>
+              <RemoveFilterButton label="de conteúdo" onClick={() => removeFilter('content')} />
             </Badge>
           )}
           {parsedQuery.category && (
-            <Badge variant="secondary" className="text-xs">
-              <Palette className="h-3 w-3 mr-1" />
-              category:{parsedQuery.category}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('category')}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+            <Badge variant="secondary" className="text-xs max-w-full">
+              <Palette className="h-3 w-3 mr-1 shrink-0" />
+              <span className="truncate">categoria:{parsedQuery.category}</span>
+              <RemoveFilterButton label="de categoria" onClick={() => removeFilter('category')} />
             </Badge>
           )}
           {parsedQuery.isFavorite === true && (
             <Badge variant="secondary" className="text-xs">
               <Star className="h-3 w-3 mr-1 fill-current" />
-              favorite
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('favorite')}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+              favorito
+              <RemoveFilterButton label="de favoritos" onClick={() => removeFilter('favorite')} />
             </Badge>
           )}
           {parsedQuery.isFavorite === false && (
             <Badge variant="secondary" className="text-xs">
               <Star className="h-3 w-3 mr-1" />
-              not favorite
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => removeFilter('favorite')}
-                className="ml-1 h-3 w-3 p-0 hover:bg-transparent"
-              >
-                <X className="h-2 w-2" />
-              </Button>
+              não favorito
+              <RemoveFilterButton label="de não favoritos" onClick={() => removeFilter('favorite')} />
             </Badge>
           )}
         </div>
@@ -291,22 +292,23 @@ export function AdvancedSearchInput({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => addQuickFilter('is:favorite')}
+            onClick={() => addQuickFilter('favorito:sim')}
             className="text-xs"
           >
             <Star className="h-3 w-3 mr-1" />
-            Favorites
+            Favoritos
           </Button>
-          {tags.slice(0, 3).map((tag) => (
+          {popularTags.map((tag) => (
             <Button
               key={tag}
               variant="outline"
               size="sm"
-              onClick={() => addQuickFilter(`tag:${tag}`)}
-              className="text-xs"
+              onClick={() => addQuickFilter(formatTagFilter([tag]))}
+              className="text-xs max-w-[12rem]"
+              title={`Filtrar pela tag ${tag}`}
             >
-              <Tag className="h-3 w-3 mr-1" />
-              {tag}
+              <Tag className="h-3 w-3 mr-1 shrink-0" />
+              <span className="truncate">{tag}</span>
             </Button>
           ))}
         </div>

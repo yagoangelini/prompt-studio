@@ -66,6 +66,7 @@ export default defineConfig({
       input: {
         main: path.resolve(__dirname, 'index.html'),
         menubar: path.resolve(__dirname, 'menubar.html'),
+        quickpaste: path.resolve(__dirname, 'quickpaste.html'),
       },
       output: {
         manualChunks: {

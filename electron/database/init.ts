@@ -59,7 +59,7 @@ export const initDatabase = (): Promise<Database> => {
 
 const createTables = (): Promise<void> => {
   return new Promise((resolve, reject) => {
-    if (!database) return reject(new Error('Database not initialized'))
+    if (!database) return reject(new Error('O banco de dados não foi inicializado'))
 
     const tables = [
       // Settings table
@@ -131,6 +131,27 @@ const createTables = (): Promise<void> => {
         token_usage TEXT, -- JSON object with usage stats
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE
+      )`,
+
+      // Runs of the "Testes" panel (history and comparison). The tested text is kept even when the
+      // prompt it came from is deleted.
+      `CREATE TABLE IF NOT EXISTS test_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prompt_id INTEGER,
+        prompt_text TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        temperature REAL,
+        max_tokens INTEGER,
+        response TEXT,
+        error TEXT,
+        response_time_ms INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        source TEXT NOT NULL DEFAULT 'test',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE SET NULL
       )`
     ]
 
@@ -151,7 +172,8 @@ const createTables = (): Promise<void> => {
         completed++
 
         if (completed === total) {
-          insertDefaultData()
+          addMissingColumns()
+            .then(insertDefaultData)
             .then(resolve)
             .catch(reject)
         }
@@ -160,9 +182,39 @@ const createTables = (): Promise<void> => {
   })
 }
 
+// Columns added after the first release. Each one is added only when missing, so fresh and existing
+// databases end up with the same schema.
+const COLUMN_MIGRATIONS: ReadonlyArray<{ table: string; column: string; definition: string }> = [
+  { table: 'prompts', column: 'is_pinned', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'prompts', column: 'usage_count', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'prompts', column: 'last_used_at', definition: 'DATETIME' },
+  // Manual position inside a sequence category (null = not ordered yet)
+  { table: 'prompts', column: 'sort_order', definition: 'INTEGER' },
+  { table: 'categories', column: 'is_sequence', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'categories', column: 'parent_id', definition: 'INTEGER REFERENCES categories (id)' },
+  // "test" or "compare" (tab where the run was executed)
+  { table: 'test_runs', column: 'source', definition: "TEXT NOT NULL DEFAULT 'test'" },
+]
+
+const addMissingColumns = async (): Promise<void> => {
+  const db = database
+  if (!db) throw new Error('O banco de dados não foi inicializado')
+  const all = <T>(sql: string): Promise<T[]> =>
+    new Promise((resolve, reject) => db.all(sql, (err, rows) => (err ? reject(err) : resolve(rows as T[]))))
+  const run = (sql: string): Promise<void> =>
+    new Promise((resolve, reject) => db.run(sql, (err) => (err ? reject(err) : resolve())))
+
+  for (const { table, column, definition } of COLUMN_MIGRATIONS) {
+    const columns = await all<{ name: string }>(`PRAGMA table_info(${table})`)
+    if (!columns.some((c) => c.name === column)) {
+      await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
+  }
+}
+
 const insertDefaultData = (): Promise<void> => {
   return new Promise((resolve, reject) => {
-    if (!database) return reject(new Error('Database not initialized'))
+    if (!database) return reject(new Error('O banco de dados não foi inicializado'))
 
     // Check if this is first time setup by looking at settings
     database.get('SELECT value FROM settings WHERE key = ?', ['first_time_setup_complete'], (err, row: any) => {
@@ -171,22 +223,10 @@ const insertDefaultData = (): Promise<void> => {
         return reject(err)
       }
 
-      // If first time setup is already complete, just insert basic categories if none exist
+      // Once setup is complete, never add data on its own: the user may have deleted the
+      // default categories on purpose (sample data only comes back through a factory reset)
       if (row && row.value === 'true') {
-        database!.get('SELECT COUNT(*) as count FROM categories', (countErr, countRow: any) => {
-          if (countErr) {
-            console.error('Error checking existing categories:', countErr)
-            return reject(countErr)
-          }
-          
-          if (countRow.count > 0) {
-            return resolve() // Data already exists
-          }
-          
-          // Insert just basic categories for existing users
-          insertBasicCategories().then(resolve).catch(reject)
-        })
-        return
+        return resolve()
       }
 
       // This is first time setup - insert sample data
@@ -211,59 +251,9 @@ const insertDefaultData = (): Promise<void> => {
   })
 }
 
-const insertBasicCategories = (): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    if (!database) return reject(new Error('Database not initialized'))
-
-    // Insert just the basic default categories (no sample prompts)
-    const basicCategories = [
-      { name: 'General', description: 'General purpose prompts', color: '#007acc' },
-      { name: 'Creative Writing', description: 'Prompts for creative writing tasks', color: '#ff6b6b' },
-      { name: 'Code Generation', description: 'Programming and code-related prompts', color: '#4ecdc4' },
-      { name: 'Analysis', description: 'Data analysis and research prompts', color: '#45b7d1' },
-      { name: 'Business', description: 'Business and professional prompts', color: '#96ceb4' }
-    ]
-
-    database.run('BEGIN TRANSACTION', (beginErr) => {
-      if (beginErr) {
-        console.error('Error starting transaction:', beginErr)
-        return reject(beginErr)
-      }
-
-      let completed = 0
-      const total = basicCategories.length
-
-      basicCategories.forEach((category) => {
-        database!.run(
-          'INSERT OR IGNORE INTO categories (name, description, color) VALUES (?, ?, ?)',
-          [category.name, category.description, category.color],
-          function(err) {
-            if (err) {
-              console.error('Error inserting basic category:', err)
-              database!.run('ROLLBACK')
-              return reject(err)
-            }
-            
-            completed++
-            if (completed === total) {
-              database!.run('COMMIT', (commitErr) => {
-                if (commitErr) {
-                  console.error('Error committing basic categories:', commitErr)
-                  return reject(commitErr)
-                }
-                resolve()
-              })
-            }
-          }
-        )
-      })
-    })
-  })
-}
-
 const insertSampleData = (): Promise<void> => {
   return new Promise((resolve, reject) => {
-    if (!database) return reject(new Error('Database not initialized'))
+    if (!database) return reject(new Error('O banco de dados não foi inicializado'))
 
     // Use transaction for all sample data
     database.run('BEGIN TRANSACTION', (beginErr) => {
@@ -395,67 +385,46 @@ const insertSampleData = (): Promise<void> => {
 }
 
 // Factory reset function - clears all user data and resets to sample data
-export const factoryReset = (): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    if (!database) return reject(new Error('Database not initialized'))
+export const factoryReset = async (): Promise<void> => {
+  if (!database) throw new Error('O banco de dados não foi inicializado')
+  const db = database
+  const run = (sql: string, params: unknown[] = []): Promise<void> =>
+    new Promise((resolve, reject) => db.run(sql, params, (err) => (err ? reject(err) : resolve())))
 
-    console.log('Performing factory reset...')
-    
-    database.run('BEGIN TRANSACTION', (beginErr) => {
-      if (beginErr) {
-        console.error('Error starting factory reset transaction:', beginErr)
-        return reject(beginErr)
-      }
+  console.log('Performing factory reset...')
 
-      // Delete all data in reverse order of dependencies
-      const deleteQueries = [
-        'DELETE FROM test_results',
-        'DELETE FROM prompt_versions', 
-        'DELETE FROM prompts',
-        'DELETE FROM templates',
-        'DELETE FROM categories',
-        'DELETE FROM settings WHERE key != "first_time_setup_complete"' // Keep the first time setup flag
-      ]
+  // Delete all data in reverse order of dependencies, one statement at a time: firing them
+  // in parallel let 'DELETE FROM categories' run before prompts/templates and fail the FOREIGN KEY
+  const deleteQueries = [
+    'DELETE FROM test_results',
+    'DELETE FROM test_runs',
+    'DELETE FROM prompt_versions',
+    'DELETE FROM prompts',
+    'DELETE FROM templates',
+    'DELETE FROM categories',
+    // Keeps the first time setup flag, and the automatic backup and quick paste settings: resetting the
+    // data must not silently turn off backups or take away the global shortcut
+    "DELETE FROM settings WHERE key NOT IN ('first_time_setup_complete', 'backup', 'quickPaste')"
+  ]
 
-      let completed = 0
-      const total = deleteQueries.length
+  await run('BEGIN TRANSACTION')
+  try {
+    for (const query of deleteQueries) {
+      await run(query)
+    }
+    // Reset the first time setup flag so sample data will be loaded again
+    await run('UPDATE settings SET value = ? WHERE key = ?', ['false', 'first_time_setup_complete'])
+    await run('COMMIT')
+  } catch (error) {
+    console.error('Error during factory reset:', error)
+    await run('ROLLBACK').catch(() => {})
+    throw error
+  }
+  console.log('Factory reset completed successfully')
 
-      deleteQueries.forEach((query) => {
-        database!.run(query, (err) => {
-          if (err) {
-            console.error('Error during factory reset:', err)
-            database!.run('ROLLBACK')
-            return reject(err)
-          }
-          
-          completed++
-          if (completed === total) {
-            // Reset the first time setup flag so sample data will be loaded again
-            database!.run(
-              'UPDATE settings SET value = ? WHERE key = ?',
-              ['false', 'first_time_setup_complete'],
-              (updateErr) => {
-                if (updateErr) {
-                  console.error('Error resetting first time setup flag:', updateErr)
-                  database!.run('ROLLBACK')
-                  return reject(updateErr)
-                }
-                
-                database!.run('COMMIT', (commitErr) => {
-                  if (commitErr) {
-                    console.error('Error committing factory reset:', commitErr)
-                    return reject(commitErr)
-                  }
-                  console.log('Factory reset completed successfully')
-                  resolve()
-                })
-              }
-            )
-          }
-        })
-      })
-    })
-  })
+  // Reload the sample data right away (the flag is now 'false'), so the app
+  // doesn't stay empty until the next launch
+  await insertDefaultData()
 }
 
 export const closeDatabase = (): Promise<void> => {

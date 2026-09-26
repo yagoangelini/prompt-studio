@@ -1,8 +1,12 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog } from 'electron'
-import { join } from 'path'
-import { readFileSync, existsSync } from 'fs'
-import { initDatabase, factoryReset } from './database/init'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, shell, screen } from 'electron'
+import type { OpenDialogOptions, SaveDialogOptions } from 'electron'
+import { join, extname } from 'path'
+import { existsSync } from 'fs'
+import { initDatabase, factoryReset, closeDatabase } from './database/init'
 import McpServer from './mcp-server'
+import { getMenuBarWindowBounds } from './window-position'
+import { FEATURES } from './features'
+import type { FeatureContext, RendererPage } from './features/context'
 import {
   getAllPrompts,
   getPrompt,
@@ -12,6 +16,8 @@ import {
   searchPrompts,
   getPromptsByTag,
   getAllTags,
+  renameTag,
+  deleteTag,
   getPromptVersions,
   createPromptVersion,
   getSetting,
@@ -36,10 +42,15 @@ import type {
   UpdateCategoryData,
   CreateTemplateData,
   UpdateTemplateData,
-  ApiTestRequest,
-  ApiTestResponse,
+  ExportResult,
   ImportResult,
+  McpServerStatus,
+  McpServerStatusEvent,
 } from '../src/types'
+
+// Use pt-BR as the Chromium locale (native context menus, spellchecker, navigator.language,
+// form validation messages). Must be set before the app is ready.
+app.commandLine.appendSwitch('lang', 'pt-BR')
 
 class PromptStudioApp {
   private mainWindow: BrowserWindow | null = null
@@ -51,6 +62,10 @@ class PromptStudioApp {
   private readonly isDev: boolean = process.env.IS_DEV === 'true'
   private readonly enableDevTools: boolean = process.env.ENABLE_DEV_TOOLS === 'true'
   private isQuitting: boolean = false
+  private quitCleanupStarted: boolean = false
+  private quitCleanupDone: boolean = false
+  // When the menu bar popup was last hidden because it lost focus (see toggleMenuBarWindow)
+  private menuBarHiddenOnBlurAt: number = 0
 
   constructor() {
     this.setupEventHandlers()
@@ -67,31 +82,122 @@ class PromptStudioApp {
       }
     })
 
+    // Another copy was launched: it quits, this one comes to the front in its current mode
+    app.on('second-instance', () => {
+      void this.showApp()
+    })
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         this.createMainWindow()
       } else if (this.currentMode === 'desktop' && this.mainWindow) {
-        this.mainWindow.show()
+        this.revealWindow(this.mainWindow)
       }
     })
 
-    app.on('before-quit', async () => {
+    // Electron does not wait for async 'before-quit' listeners: hold the quit once, stop the MCP
+    // server and close the database, then quit for real
+    app.on('before-quit', (event) => {
       this.isQuitting = true
-      // Close database connection
-      if (this.db) {
+      if (this.quitCleanupDone) return
+      event.preventDefault()
+      if (this.quitCleanupStarted) return
+      this.quitCleanupStarted = true
+      const cleanup = async () => {
+        for (const feature of FEATURES) {
+          try {
+            await feature.stop?.()
+          } catch (error) {
+            console.error(`Error stopping feature "${feature.name}":`, error)
+          }
+        }
         try {
-          const { closeDatabase } = await import('./database/init')
+          await this.mcpServer?.stop()
+        } catch (error) {
+          console.error('Error stopping MCP server:', error)
+        }
+        try {
           await closeDatabase()
           console.log('Database closed on app quit')
         } catch (error) {
           console.error('Error closing database:', error)
         }
       }
+      const safetyTimeout = new Promise<void>((resolve) => setTimeout(resolve, 5000))
+      void Promise.race([cleanup(), safetyTimeout]).finally(() => {
+        this.quitCleanupDone = true
+        app.quit()
+      })
     })
+  }
+
+  // Shows a window and tells its page, so it can refresh its data (the page is not reloaded)
+  private revealWindow(window: BrowserWindow): void {
+    if (window.isDestroyed()) return
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+    window.webContents.send('app:window-shown')
+  }
+
+  private broadcast(channel: string, payload?: unknown): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(channel, payload)
+    }
+  }
+
+  private async getMcpStatus(): Promise<McpServerStatus> {
+    if (this.mcpServer) {
+      // Prompts deleted since the last update (any window or path) no longer count as exposed
+      await this.mcpServer.pruneDeletedPrompts()
+      return this.mcpServer.getStatus()
+    }
+    return {
+      running: false, port: 0, host: '127.0.0.1', exposedPrompts: 0, connections: 0, uptime: 0,
+      requests: 0, errors: 0, logs: [], message: 'O servidor MCP não foi inicializado',
+    }
+  }
+
+  private async broadcastMcpStatus(): Promise<void> {
+    const status = await this.getMcpStatus()
+    const payload: McpServerStatusEvent = {
+      running: status.running,
+      port: status.running ? status.port : null,
+      exposedPrompts: status.exposedPrompts,
+    }
+    this.broadcast('mcp-server:status-changed', payload)
+  }
+
+  private createFeatureContext(): FeatureContext {
+    return {
+      isDev: this.isDev,
+      preloadPath: join(__dirname, 'preload.js'),
+      getDb: () => this.db,
+      getMainWindow: () => this.mainWindow,
+      getMenuBarWindow: () => this.menuBarWindow,
+      broadcast: (channel, payload) => this.broadcast(channel, payload),
+      loadPage: async (window: BrowserWindow, page: RendererPage) => {
+        if (this.isDev) {
+          await window.loadURL(page === 'index' ? 'http://localhost:5173' : `http://localhost:5173/${page}`)
+        } else {
+          await window.loadFile(join(__dirname, `../dist/${page}.html`))
+        }
+      },
+      showMainWindow: async () => {
+        if (this.currentMode !== 'desktop') {
+          await this.switchMode('desktop')
+        } else if (this.mainWindow) {
+          this.revealWindow(this.mainWindow)
+        }
+      },
+    }
   }
 
   private async initialize(): Promise<void> {
     try {
+      // Replace Electron's default (English) application menu with the pt-BR equivalent
+      this.createApplicationMenu()
+
       // Initialize database
       this.db = await initDatabase()
       
@@ -105,16 +211,33 @@ class PromptStudioApp {
 
       // Setup IPC handlers BEFORE creating windows
       this.setupIpcHandlers()
+      const featureContext = this.createFeatureContext()
+      for (const feature of FEATURES) {
+        feature.registerIpc(featureContext)
+      }
 
       // Create windows
       await this.createMainWindow()
       await this.createMenuBarWindow()
       this.createTray()
 
+      // A feature that fails to start must not take the whole app down
+      for (const feature of FEATURES) {
+        try {
+          await feature.start?.(featureContext)
+        } catch (error) {
+          console.error(`Error starting feature "${feature.name}":`, error)
+        }
+      }
+
       // Show appropriate window
       if (this.currentMode === 'desktop' && this.mainWindow) {
         this.mainWindow.show()
         this.mainWindow.focus()
+      } else if (this.currentMode === 'menubar') {
+        // Started in menu bar mode: open the popup once, so the user sees where the app is.
+        // Small delay: the tray icon needs a moment to report its position.
+        setTimeout(() => this.showMenuBarWindow(), 300)
       }
     } catch (error) {
       console.error('Failed to initialize app:', error)
@@ -177,12 +300,27 @@ class PromptStudioApp {
   }
 
   private async createMenuBarWindow(): Promise<void> {
+    // The window can be resized; the last size the user chose is remembered
+    const savedSize = this.db ? await getSetting(this.db, 'menuBarWindowSize') : null
+    let width = 400
+    let height = 600
+    try {
+      const parsed = savedSize ? JSON.parse(savedSize) : null
+      if (Number.isFinite(parsed?.width) && Number.isFinite(parsed?.height)) {
+        ({ width, height } = parsed)
+      }
+    } catch {
+      // A corrupted value falls back to the default size instead of breaking startup
+    }
+
     this.menuBarWindow = new BrowserWindow({
-      width: 400,
-      height: 600,
+      width,
+      height,
+      minWidth: 360,
+      minHeight: 420,
       show: false,
       frame: false,
-      resizable: false,
+      resizable: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -199,10 +337,168 @@ class PromptStudioApp {
     }
 
     this.menuBarWindow.on('blur', () => {
-      if (this.currentMode === 'menubar' && this.menuBarWindow) {
+      if (this.currentMode === 'menubar' && this.menuBarWindow?.isVisible()) {
+        this.menuBarHiddenOnBlurAt = Date.now()
         this.menuBarWindow.hide()
       }
     })
+
+    // 'resized' fires once the user finishes dragging an edge
+    this.menuBarWindow.on('resized', async () => {
+      if (!this.menuBarWindow || !this.db) return
+      const [newWidth, newHeight] = this.menuBarWindow.getSize()
+      await setSetting(this.db, 'menuBarWindowSize', JSON.stringify({ width: newWidth, height: newHeight }))
+    })
+  }
+
+  // Same structure as Electron's default application menu, but with explicit pt-BR labels
+  // (role-based menus such as 'editMenu' always show fixed English labels on their items)
+  private createApplicationMenu(): void {
+    const isMac = process.platform === 'darwin'
+
+    const appMenu: Electron.MenuItemConstructorOptions[] = isMac
+      ? [
+          {
+            role: 'appMenu',
+            label: 'Prompt Studio',
+            submenu: [
+              { role: 'about', label: 'Sobre o Prompt Studio' },
+              { type: 'separator' },
+              { role: 'services', label: 'Serviços' },
+              { type: 'separator' },
+              { role: 'hide', label: 'Ocultar Prompt Studio' },
+              { role: 'hideOthers', label: 'Ocultar outros' },
+              { role: 'unhide', label: 'Mostrar tudo' },
+              { type: 'separator' },
+              { role: 'quit', label: 'Sair do Prompt Studio' },
+            ],
+          },
+        ]
+      : []
+
+    const editPlatformItems: Electron.MenuItemConstructorOptions[] = isMac
+      ? [
+          { role: 'pasteAndMatchStyle', label: 'Colar e manter estilo' },
+          { role: 'delete', label: 'Excluir' },
+          { role: 'selectAll', label: 'Selecionar tudo' },
+          { type: 'separator' },
+          {
+            label: 'Substituições',
+            submenu: [
+              { role: 'showSubstitutions', label: 'Mostrar substituições' },
+              { type: 'separator' },
+              { role: 'toggleSmartQuotes', label: 'Aspas inteligentes' },
+              { role: 'toggleSmartDashes', label: 'Travessões inteligentes' },
+              { role: 'toggleTextReplacement', label: 'Substituição de texto' },
+            ],
+          },
+          {
+            label: 'Fala',
+            submenu: [
+              { role: 'startSpeaking', label: 'Começar a falar' },
+              { role: 'stopSpeaking', label: 'Parar de falar' },
+            ],
+          },
+        ]
+      : [
+          { role: 'delete', label: 'Excluir' },
+          { type: 'separator' },
+          { role: 'selectAll', label: 'Selecionar tudo' },
+        ]
+
+    const windowPlatformItems: Electron.MenuItemConstructorOptions[] = isMac
+      ? [
+          { type: 'separator' },
+          { role: 'front', label: 'Trazer tudo para a frente' },
+        ]
+      : [
+          { role: 'close', label: 'Fechar' },
+        ]
+
+    const helpItems: Electron.MenuItemConstructorOptions[] = app.isPackaged
+      ? []
+      : [
+          {
+            label: 'Saiba mais',
+            click: async () => {
+              await shell.openExternal('https://electronjs.org')
+            },
+          },
+          {
+            label: 'Documentação',
+            click: async () => {
+              const version = process.versions.electron
+              await shell.openExternal(`https://github.com/electron/electron/tree/v${version}/docs#readme`)
+            },
+          },
+          {
+            label: 'Discussões da comunidade',
+            click: async () => {
+              await shell.openExternal('https://discord.gg/electronjs')
+            },
+          },
+          {
+            label: 'Buscar issues',
+            click: async () => {
+              await shell.openExternal('https://github.com/electron/electron/issues')
+            },
+          },
+        ]
+
+    const template: Electron.MenuItemConstructorOptions[] = [
+      ...appMenu,
+      {
+        role: 'fileMenu',
+        label: 'Arquivo',
+        submenu: [
+          isMac ? { role: 'close', label: 'Fechar janela' } : { role: 'quit', label: 'Sair' },
+        ],
+      },
+      {
+        role: 'editMenu',
+        label: 'Editar',
+        submenu: [
+          { role: 'undo', label: 'Desfazer' },
+          { role: 'redo', label: 'Refazer' },
+          { type: 'separator' },
+          { role: 'cut', label: 'Recortar' },
+          { role: 'copy', label: 'Copiar' },
+          { role: 'paste', label: 'Colar' },
+          ...editPlatformItems,
+        ],
+      },
+      {
+        role: 'viewMenu',
+        label: 'Exibir',
+        submenu: [
+          { role: 'reload', label: 'Recarregar' },
+          { role: 'forceReload', label: 'Forçar recarregamento' },
+          { role: 'toggleDevTools', label: 'Ferramentas do desenvolvedor' },
+          { type: 'separator' },
+          { role: 'resetZoom', label: 'Tamanho real' },
+          { role: 'zoomIn', label: 'Aumentar zoom' },
+          { role: 'zoomOut', label: 'Diminuir zoom' },
+          { type: 'separator' },
+          { role: 'togglefullscreen', label: 'Tela cheia' },
+        ],
+      },
+      {
+        role: 'windowMenu',
+        label: 'Janela',
+        submenu: [
+          { role: 'minimize', label: 'Minimizar' },
+          { role: 'zoom', label: 'Zoom' },
+          ...windowPlatformItems,
+        ],
+      },
+      {
+        role: 'help',
+        label: 'Ajuda',
+        submenu: helpItems,
+      },
+    ]
+
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template))
   }
 
   private createTray(): void {
@@ -211,25 +507,25 @@ class PromptStudioApp {
 
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: 'Show Prompt Studio',
+        label: 'Mostrar Prompt Studio',
         click: async () => await this.showApp(),
       },
       { type: 'separator' },
       {
-        label: 'Desktop Mode',
+        label: 'Modo desktop',
         type: 'radio',
         checked: this.currentMode === 'desktop',
         click: () => this.switchMode('desktop'),
       },
       {
-        label: 'Menu Bar Mode',
+        label: 'Modo barra de menus',
         type: 'radio',
         checked: this.currentMode === 'menubar',
         click: () => this.switchMode('menubar'),
       },
       { type: 'separator' },
       {
-        label: 'Quit',
+        label: 'Sair',
         click: () => {
           this.isQuitting = true
           app.quit()
@@ -284,12 +580,12 @@ class PromptStudioApp {
     return existsSync(iconPath) ? iconPath : ''
   }
 
+  // "Mostrar Prompt Studio" always shows the app (it never hides it)
   private async showApp(): Promise<void> {
     if (this.currentMode === 'desktop' && this.mainWindow) {
-      this.mainWindow.show()
-      this.mainWindow.focus()
+      this.revealWindow(this.mainWindow)
     } else if (this.currentMode === 'menubar') {
-      await this.toggleMenuBarWindow()
+      this.showMenuBarWindow()
     }
   }
 
@@ -298,8 +594,7 @@ class PromptStudioApp {
       if (this.mainWindow.isVisible()) {
         this.mainWindow.hide()
       } else {
-        this.mainWindow.show()
-        this.mainWindow.focus()
+        this.revealWindow(this.mainWindow)
       }
     } else {
       await this.toggleMenuBarWindow()
@@ -311,22 +606,28 @@ class PromptStudioApp {
 
     if (this.menuBarWindow.isVisible()) {
       this.menuBarWindow.hide()
-    } else {
-      // Ensure menubar window has the correct content
-      if (this.isDev) {
-        await this.menuBarWindow.loadURL('http://localhost:5173/menubar')
-      } else {
-        await this.menuBarWindow.loadFile(join(__dirname, '../dist/menubar.html'))
-      }
-      
-      const bounds = this.tray.getBounds()
-      const x = Math.round(bounds.x + bounds.width / 2 - 200)
-      const y = Math.round(bounds.y + bounds.height)
-
-      this.menuBarWindow.setPosition(x, y, false)
-      this.menuBarWindow.show()
-      this.menuBarWindow.focus()
+      return
     }
+    // Clicking the tray icon while the popup is open first blurs it (which hides it) and then
+    // toggles: without this guard that click would reopen the popup the user wanted to close
+    if (Date.now() - this.menuBarHiddenOnBlurAt < 300) return
+    this.showMenuBarWindow()
+  }
+
+  private showMenuBarWindow(): void {
+    if (!this.menuBarWindow || this.menuBarWindow.isDestroyed() || !this.tray) return
+
+    // The page is kept loaded between openings (it refreshes its data on 'app:window-shown'),
+    // so the search, scroll position and an open editor survive
+    if (!this.menuBarWindow.isVisible()) {
+      // Open next to the tray icon and fully inside the screen: on Windows the tray sits in a
+      // taskbar at the bottom, so placing the window below the icon put it off-screen
+      const trayBounds = this.tray.getBounds()
+      const { workArea } = screen.getDisplayMatching(trayBounds)
+      const [width, height] = this.menuBarWindow.getSize()
+      this.menuBarWindow.setBounds(getMenuBarWindowBounds(trayBounds, workArea, { width: width ?? 400, height: height ?? 600 }), false)
+    }
+    this.revealWindow(this.menuBarWindow)
   }
 
   private async switchMode(mode: 'desktop' | 'menubar'): Promise<void> {
@@ -350,7 +651,8 @@ class PromptStudioApp {
       }
     } else {
       if (this.mainWindow) this.mainWindow.hide()
-      if (this.menuBarWindow) this.menuBarWindow.hide()
+      // Show the popup once, so the user sees where the app went
+      setTimeout(() => this.showMenuBarWindow(), 300)
     }
 
     this.updateTrayMenu()
@@ -361,25 +663,25 @@ class PromptStudioApp {
 
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: 'Show Prompt Studio',
+        label: 'Mostrar Prompt Studio',
         click: async () => await this.showApp(),
       },
       { type: 'separator' },
       {
-        label: 'Desktop Mode',
+        label: 'Modo desktop',
         type: 'radio',
         checked: this.currentMode === 'desktop',
         click: () => this.switchMode('desktop'),
       },
       {
-        label: 'Menu Bar Mode',
+        label: 'Modo barra de menus',
         type: 'radio',
         checked: this.currentMode === 'menubar',
         click: () => this.switchMode('menubar'),
       },
       { type: 'separator' },
       {
-        label: 'Quit',
+        label: 'Sair',
         click: () => {
           this.isQuitting = true
           app.quit()
@@ -410,13 +712,18 @@ class PromptStudioApp {
     // Factory reset handler
     ipcMain.handle('factory-reset', async () => {
       try {
+        // The exposed prompt ids no longer exist after the reset
+        if (this.mcpServer?.isRunning()) {
+          await this.mcpServer.stop()
+          await this.broadcastMcpStatus()
+        }
         await factoryReset()
         // Reinitialize database to load sample data
         this.db = await initDatabase()
         return { success: true }
       } catch (error) {
         console.error('Factory reset failed:', error)
-        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+        return { success: false, error: error instanceof Error ? error.message : 'Erro desconhecido' }
       }
     })
 
@@ -495,6 +802,14 @@ class PromptStudioApp {
       return await getAllTags(this.db!)
     })
 
+    ipcMain.handle('rename-tag', async (_event, oldName: string, newName: string) => {
+      return await renameTag(this.db!, oldName, newName)
+    })
+
+    ipcMain.handle('delete-tag', async (_event, name: string) => {
+      return await deleteTag(this.db!, name)
+    })
+
     // Version handlers
     ipcMain.handle('get-prompt-versions', async (_event, promptId: number) => {
       return await getPromptVersions(this.db!, promptId)
@@ -513,134 +828,118 @@ class PromptStudioApp {
       return await setSetting(this.db!, key, value)
     })
 
-    // Import/Export handlers
-    ipcMain.handle('export-prompts', async (_event, format: 'json' | 'txt') => {
-      const { filePath } = await dialog.showSaveDialog({
-        filters: format === 'json'
-          ? [{ name: 'JSON Files', extensions: ['json'] }]
-          : [{ name: 'Text Files', extensions: ['txt'] }]
-      })
-
-      if (filePath) {
-        await exportPrompts(this.db!, filePath, format)
-        return { success: true, path: filePath }
+    // Import/Export handlers (never throw: the UI shows `error` / `canceled`)
+    ipcMain.handle('export-prompts', async (event, format: unknown): Promise<ExportResult> => {
+      if (format !== 'json' && format !== 'txt') {
+        return { success: false, error: 'Formato de exportação inválido. Use JSON ou TXT.' }
       }
-      return { success: false }
-    })
-
-    ipcMain.handle('import-prompts', async (): Promise<ImportResult> => {
-      const { filePaths } = await dialog.showOpenDialog({
-        filters: [
-          { name: 'Supported Files', extensions: ['json', 'txt'] },
-          { name: 'JSON Files', extensions: ['json'] },
-          { name: 'Text Files', extensions: ['txt'] }
-        ],
-        properties: ['openFile']
-      })
-
-      if (filePaths && filePaths.length > 0) {
-        return await importPrompts(this.db!, filePaths[0])
-      }
-      return { success: false }
-    })
-
-    // Testing handler
-    ipcMain.handle('test-prompt', async (_event, request: ApiTestRequest): Promise<ApiTestResponse> => {
       try {
-        const { prompt, config } = request
-        const endpoint = config.apiEndpoint || 'https://api.openai.com/v1/chat/completions'
-
-        const startTime = Date.now()
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.apiKey}`
-          },
-          body: JSON.stringify({
-            model: config.model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: config.temperature || 0.7,
-            max_tokens: config.maxTokens
-          })
-        })
-
-        const responseTime = Date.now() - startTime
-        const data = await response.json()
-
-        if (!response.ok) {
-          throw new Error(data.error?.message || 'API request failed')
+        const owner = BrowserWindow.fromWebContents(event.sender)
+        const options: SaveDialogOptions = {
+          title: 'Exportar prompts',
+          defaultPath: `prompt-studio-${new Date().toISOString().slice(0, 10)}.${format}`,
+          filters: format === 'json'
+            ? [{ name: 'Arquivos JSON', extensions: ['json'] }]
+            : [{ name: 'Arquivos de texto', extensions: ['txt'] }],
+          properties: ['createDirectory', 'showOverwriteConfirmation'],
         }
+        const { canceled, filePath } = owner
+          ? await dialog.showSaveDialog(owner, options)
+          : await dialog.showSaveDialog(options)
+        if (canceled || !filePath) return { success: false, canceled: true }
 
-        return {
-          success: true,
-          response: data.choices[0].message.content,
-          usage: data.usage,
-          responseTime
-        }
+        const target = extname(filePath) ? filePath : `${filePath}.${format}`
+        const { count } = await exportPrompts(this.db!, target, format)
+        return { success: true, filePath: target, count }
       } catch (error) {
+        console.error('Export failed:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Não foi possível exportar os prompts.' }
+      }
+    })
+
+    ipcMain.handle('import-prompts', async (event): Promise<ImportResult> => {
+      try {
+        const owner = BrowserWindow.fromWebContents(event.sender)
+        const options: OpenDialogOptions = {
+          title: 'Importar prompts',
+          filters: [
+            { name: 'Arquivos compatíveis', extensions: ['json', 'txt'] },
+            { name: 'Arquivos JSON', extensions: ['json'] },
+            { name: 'Arquivos de texto', extensions: ['txt'] }
+          ],
+          properties: ['openFile']
+        }
+        const { canceled, filePaths } = owner
+          ? await dialog.showOpenDialog(owner, options)
+          : await dialog.showOpenDialog(options)
+        const filePath = filePaths?.[0]
+        if (canceled || !filePath) {
+          return { success: false, canceled: true, imported: 0, skipped: 0, total: 0 }
+        }
+        return await importPrompts(this.db!, filePath)
+      } catch (error) {
+        console.error('Import failed:', error)
         return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error'
+          success: false, imported: 0, skipped: 0, total: 0,
+          error: error instanceof Error ? error.message : 'Não foi possível importar os prompts.',
         }
       }
     })
 
-    // MCP Server handlers
-    ipcMain.handle('mcp-server:start', async (_event, config: any, exposedPrompts: any[]) => {
-      console.log('MCP Server start requested', { config, exposedPromptsCount: exposedPrompts?.length })
-      
+    // MCP Server handlers. Every change is broadcast to all windows ('mcp-server:status-changed').
+    ipcMain.handle('mcp-server:start', async (_event, config: unknown, exposedPrompts: unknown) => {
       if (!this.mcpServer) {
         console.error('MCP server not initialized')
-        return { success: false, message: 'MCP server not initialized' }
+        return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
-      
+
       this.mcpServer.updateConfig(config)
       this.mcpServer.updateExposedPrompts(exposedPrompts)
-      
+      await this.mcpServer.pruneDeletedPrompts()
+
       const result = await this.mcpServer.start()
       console.log('MCP Server start result:', result)
+      await this.broadcastMcpStatus()
       return result
     })
 
     ipcMain.handle('mcp-server:stop', async () => {
       if (!this.mcpServer) {
-        return { success: false, message: 'MCP server not initialized' }
+        return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
-      
+
       const result = await this.mcpServer.stop()
+      await this.broadcastMcpStatus()
       return result
     })
 
-    ipcMain.handle('mcp-server:status', async () => {
-      if (!this.mcpServer) {
-        return { running: false, message: 'MCP server not initialized' }
-      }
-      
-      return this.mcpServer.getStatus()
+    ipcMain.handle('mcp-server:status', async (): Promise<McpServerStatus> => {
+      return await this.getMcpStatus()
     })
 
-    ipcMain.handle('mcp-server:update-config', async (_event, config: any) => {
+    ipcMain.handle('mcp-server:update-config', async (_event, config: unknown) => {
       if (!this.mcpServer) {
-        return { success: false, message: 'MCP server not initialized' }
+        return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
-      
+
       this.mcpServer.updateConfig(config)
       return { success: true }
     })
 
-    ipcMain.handle('mcp-server:update-exposed-prompts', async (_event, exposedPrompts: any[]) => {
+    ipcMain.handle('mcp-server:update-exposed-prompts', async (_event, exposedPrompts: unknown) => {
       if (!this.mcpServer) {
-        return { success: false, message: 'MCP server not initialized' }
+        return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
-      
+
       this.mcpServer.updateExposedPrompts(exposedPrompts)
-      return { success: true }
+      // The broadcast also drops ids of deleted prompts, so the count below only has existing prompts
+      await this.broadcastMcpStatus()
+      return { success: true, exposedPrompts: this.mcpServer.getStatus().exposedPrompts }
     })
 
     ipcMain.handle('mcp-server:clear-logs', async () => {
       if (!this.mcpServer) {
-        return { success: false, message: 'MCP server not initialized' }
+        return { success: false, message: 'O servidor MCP não foi inicializado' }
       }
       
       this.mcpServer.clearLogs()
@@ -649,5 +948,11 @@ class PromptStudioApp {
   }
 }
 
-// Initialize the application
-new PromptStudioApp()
+// Initialize the application. One instance per userData folder (Electron keeps the lock there, so
+// test runs with their own --user-data-dir still start side by side): a second launch quits and the
+// first instance shows itself instead (see 'second-instance')
+if (app.requestSingleInstanceLock()) {
+  new PromptStudioApp()
+} else {
+  app.quit()
+}
