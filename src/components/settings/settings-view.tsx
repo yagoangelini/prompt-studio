@@ -7,6 +7,9 @@ import { CategoryManager } from './category-manager'
 import { TagManager } from './tag-manager'
 import { FactoryReset } from './factory-reset'
 import { KeyboardShortcutsSettings } from './keyboard-shortcuts-settings'
+import { QuickPasteSettingsCard } from './quick-paste-settings'
+import { BackupSettingsCard } from './backup-settings'
+import { ClaudeCommandsSettingsCard } from './claude-commands-settings'
 import { usePromptStore, SETTINGS_TABS, type SettingsTab } from '@/stores/usePromptStore'
 import { Palette, Settings as SettingsIcon, Database, Hash, X, Download, Upload, RefreshCw } from 'lucide-react'
 
@@ -253,12 +256,17 @@ export function SettingsView({ onClose }: SettingsViewProps) {
               </TabsContent>
 
               <TabsContent value="general" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
-                <KeyboardShortcutsSettings />
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-6 pb-4">
+                  <QuickPasteSettingsCard />
+                  <KeyboardShortcutsSettings />
+                </div>
               </TabsContent>
 
               <TabsContent value="data" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
                 <div className="flex-1 min-h-0 overflow-y-auto space-y-6 pb-4">
                   <DataTransfer />
+                  <ClaudeCommandsSettingsCard />
+                  <BackupSettingsCard />
                   <FactoryReset />
                 </div>
               </TabsContent>

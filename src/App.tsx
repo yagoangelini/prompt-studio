@@ -4,6 +4,9 @@ import { Toaster } from './components/ui/toaster'
 import { ConfirmDialogHost } from './components/ui/confirm-dialog'
 import { DesktopLayout } from './components/layout/desktop-layout'
 import { MenuBarLayout } from './components/layout/menubar-layout'
+import { QuickPasteLayout } from './components/quick-paste/quick-paste-layout'
+import { FillVariablesDialogHost } from './components/prompts/fill-variables-dialog'
+import { CommandPalette } from './components/command-palette/command-palette'
 import { usePromptStore } from './stores/usePromptStore'
 import { CrashHandler, setupGlobalErrorHandlers } from './components/crash-handler'
 import { SEARCH_FIELD_SELECTOR, useKeyboardShortcuts } from './hooks/use-keyboard-shortcuts'
@@ -11,6 +14,8 @@ import { SEARCH_FIELD_SELECTOR, useKeyboardShortcuts } from './hooks/use-keyboar
 // The menu bar popup (menubar.html) is loaded once and then only hidden and shown, so the layout
 // follows the window itself, not the app mode read when the page was loaded
 const IS_MENU_BAR_WINDOW = /\/menubar(\.html)?$/i.test(window.location.pathname)
+// The quick paste window (quickpaste.html), opened by the global shortcut
+const IS_QUICK_PASTE_WINDOW = /\/quickpaste(\.html)?$/i.test(window.location.pathname)
 
 // Order used by Ctrl+T
 const THEME_CYCLE: readonly Theme[] = [
@@ -159,6 +164,13 @@ function AppInner() {
     })
   }, [fetchAllData])
 
+  // Data changed outside this window (quick paste counted a usage, another window edited prompts...)
+  useEffect(() => {
+    return window.electronAPI.onDataChanged(() => {
+      void fetchAllData()
+    })
+  }, [fetchAllData])
+
   useEffect(() => {
     // Listen for preferences dialog
     const handlePreferences = () => {
@@ -188,12 +200,14 @@ function AppInner() {
     <>
       <CrashHandler>
         <div className="app">
-          {IS_MENU_BAR_WINDOW ? <MenuBarLayout /> : <DesktopLayout />}
+          {IS_QUICK_PASTE_WINDOW ? <QuickPasteLayout /> : IS_MENU_BAR_WINDOW ? <MenuBarLayout /> : <DesktopLayout />}
+          {!IS_QUICK_PASTE_WINDOW && !IS_MENU_BAR_WINDOW && <CommandPalette />}
           <Toaster />
         </div>
       </CrashHandler>
       {/* Outside the crash boundary: the crash dialog uses it to confirm the factory reset */}
       <ConfirmDialogHost />
+      <FillVariablesDialogHost />
     </>
   )
 }

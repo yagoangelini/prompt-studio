@@ -146,6 +146,16 @@ const toPrompt = (row: any): Prompt => ({
   ...row,
   tags: normalizeTags(row.tags),
   is_favorite: Boolean(row.is_favorite),
+  is_pinned: Boolean(row.is_pinned),
+  usage_count: Number(row.usage_count ?? 0),
+  last_used_at: row.last_used_at ?? null,
+  sort_order: row.sort_order ?? null,
+})
+
+const toCategory = (row: any): Category => ({
+  ...row,
+  parent_id: row.parent_id ?? null,
+  is_sequence: Boolean(row.is_sequence),
 })
 
 const toTemplate = (row: any): Template => ({
@@ -390,7 +400,7 @@ export const createPromptVersion = async (db: Database, promptId: number, conten
 // CATEGORIES
 export const getAllCategories = async (db: Database): Promise<readonly Category[]> => {
   const sql = 'SELECT * FROM categories ORDER BY name'
-  return await allQuery<Category>(db, sql) as readonly Category[]
+  return (await allQuery<any>(db, sql)).map(toCategory)
 }
 
 const duplicateCategoryMessage = (name: string) => `Já existe uma categoria chamada "${name}"`
@@ -425,7 +435,8 @@ export const createCategory = async (db: Database, category: CreateCategoryData)
   const result = await runQuery(db, sql, [name, description || null, color || '#007acc'])
     .catch((error) => rethrowCategoryError(error, name))
 
-  const created = await getQuery<Category>(db, 'SELECT * FROM categories WHERE id = ?', [result.id])
+  const createdRow = await getQuery<any>(db, 'SELECT * FROM categories WHERE id = ?', [result.id])
+  const created = createdRow ? toCategory(createdRow) : undefined
   if (!created) throw new Error('Não foi possível criar a categoria')
   return created
 }
@@ -450,7 +461,8 @@ export const updateCategory = async (db: Database, id: number, category: UpdateC
   await runQuery(db, sql, [name, description, color, id])
     .catch((error) => rethrowCategoryError(error, name))
 
-  const updated = await getQuery<Category>(db, 'SELECT * FROM categories WHERE id = ?', [id])
+  const updatedRow = await getQuery<any>(db, 'SELECT * FROM categories WHERE id = ?', [id])
+  const updated = updatedRow ? toCategory(updatedRow) : undefined
   if (!updated) throw new Error('Não foi possível atualizar a categoria')
   return updated
 }

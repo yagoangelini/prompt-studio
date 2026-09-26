@@ -75,6 +75,31 @@ const electronAPI: ElectronAPI = {
   updateMcpServerExposedPrompts: (exposedPrompts) => invoke('mcp-server:update-exposed-prompts', exposedPrompts),
   clearMcpServerLogs: () => invoke('mcp-server:clear-logs'),
 
+  // Organization (handlers in electron/features/organization.ts)
+  setPromptPinned: (id, pinned) => invoke('prompts:set-pinned', id, pinned),
+  recordPromptUsage: (id) => invoke('prompts:record-usage', id),
+  reorderPrompts: (categoryId, orderedIds) => invoke('prompts:reorder', categoryId, orderedIds),
+  bulkUpdatePrompts: (ids, changes) => invoke('prompts:bulk-update', ids, changes),
+  bulkDeletePrompts: (ids) => invoke('prompts:bulk-delete', ids),
+
+  // Quick paste (handlers in electron/features/quick-paste.ts)
+  getQuickPasteSettings: () => invoke('quick-paste:get-settings'),
+  setQuickPasteSettings: (settings) => invoke('quick-paste:set-settings', settings),
+  pasteText: (text, promptId) => invoke('quick-paste:paste', text, promptId),
+  hideQuickPaste: () => invoke('quick-paste:hide'),
+
+  // Claude Code commands, backup and test history (handlers in electron/features/data-tools.ts)
+  exportClaudeCommands: (promptIds) => invoke('claude-commands:export', promptIds),
+  getBackupSettings: () => invoke('backup:get-settings'),
+  setBackupSettings: (settings) => invoke('backup:set-settings', settings),
+  chooseBackupDirectory: () => invoke('backup:choose-directory'),
+  runBackupNow: () => invoke('backup:run'),
+  listBackups: () => invoke('backup:list'),
+  restoreBackup: (filePath) => invoke('backup:restore', filePath),
+  listTestRuns: (options) => invoke('test-runs:list', options),
+  deleteTestRun: (id) => invoke('test-runs:delete', id),
+  clearTestRuns: () => invoke('test-runs:clear'),
+
   // Generic IPC invoke method for flexibility
   invoke: (channel: string, ...args: any[]) => invoke(channel, ...args),
 
@@ -89,6 +114,11 @@ const electronAPI: ElectronAPI = {
     const listener = () => callback()
     ipcRenderer.on('app:window-shown', listener)
     return () => { ipcRenderer.removeListener('app:window-shown', listener) }
+  },
+  onDataChanged: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('app:data-changed', listener)
+    return () => { ipcRenderer.removeListener('app:data-changed', listener) }
   },
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
 }

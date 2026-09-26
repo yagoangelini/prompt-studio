@@ -131,6 +131,26 @@ const createTables = (): Promise<void> => {
         token_usage TEXT, -- JSON object with usage stats
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE
+      )`,
+
+      // Runs of the "Testes" panel (history and comparison). The tested text is kept even when the
+      // prompt it came from is deleted.
+      `CREATE TABLE IF NOT EXISTS test_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prompt_id INTEGER,
+        prompt_text TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        temperature REAL,
+        max_tokens INTEGER,
+        response TEXT,
+        error TEXT,
+        response_time_ms INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE SET NULL
       )`
     ]
 
@@ -151,13 +171,42 @@ const createTables = (): Promise<void> => {
         completed++
 
         if (completed === total) {
-          insertDefaultData()
+          addMissingColumns()
+            .then(insertDefaultData)
             .then(resolve)
             .catch(reject)
         }
       })
     })
   })
+}
+
+// Columns added after the first release. Each one is added only when missing, so fresh and existing
+// databases end up with the same schema.
+const COLUMN_MIGRATIONS: ReadonlyArray<{ table: string; column: string; definition: string }> = [
+  { table: 'prompts', column: 'is_pinned', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'prompts', column: 'usage_count', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'prompts', column: 'last_used_at', definition: 'DATETIME' },
+  // Manual position inside a sequence category (null = not ordered yet)
+  { table: 'prompts', column: 'sort_order', definition: 'INTEGER' },
+  { table: 'categories', column: 'is_sequence', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'categories', column: 'parent_id', definition: 'INTEGER REFERENCES categories (id)' },
+]
+
+const addMissingColumns = async (): Promise<void> => {
+  const db = database
+  if (!db) throw new Error('O banco de dados não foi inicializado')
+  const all = <T>(sql: string): Promise<T[]> =>
+    new Promise((resolve, reject) => db.all(sql, (err, rows) => (err ? reject(err) : resolve(rows as T[]))))
+  const run = (sql: string): Promise<void> =>
+    new Promise((resolve, reject) => db.run(sql, (err) => (err ? reject(err) : resolve())))
+
+  for (const { table, column, definition } of COLUMN_MIGRATIONS) {
+    const columns = await all<{ name: string }>(`PRAGMA table_info(${table})`)
+    if (!columns.some((c) => c.name === column)) {
+      await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
+  }
 }
 
 const insertDefaultData = (): Promise<void> => {
@@ -345,6 +394,7 @@ export const factoryReset = async (): Promise<void> => {
   // in parallel let 'DELETE FROM categories' run before prompts/templates and fail the FOREIGN KEY
   const deleteQueries = [
     'DELETE FROM test_results',
+    'DELETE FROM test_runs',
     'DELETE FROM prompt_versions',
     'DELETE FROM prompts',
     'DELETE FROM templates',

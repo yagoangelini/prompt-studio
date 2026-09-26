@@ -1031,7 +1031,9 @@ export const usePromptStore = create<PromptStore>()(
         filtered.sort((a, b) => {
           const result = field === 'title'
             ? nameCollator.compare(a.title, b.title)
-            : toTimestamp(a[field]) - toTimestamp(b[field])
+            : field === 'usage_count'
+              ? (a.usage_count ?? 0) - (b.usage_count ?? 0)
+              : toTimestamp(a[field] ?? '') - toTimestamp(b[field] ?? '')
           return result * factor
         })
 
