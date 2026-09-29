@@ -52,6 +52,14 @@ import type {
 // form validation messages). Must be set before the app is ready.
 app.commandLine.appendSwitch('lang', 'pt-BR')
 
+// Windows groups the taskbar button, the pinned shortcut and notifications by this id; the shortcut
+// made by scripts/criar-atalho.cjs uses the same one (same as build.appId in package.json)
+const APP_USER_MODEL_ID = 'com.promptstudio.app'
+if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
+
+// Setting that remembers the "still running in the tray" notice was already shown
+const TRAY_NOTICE_SETTING = 'closeToTrayNoticeShown'
+
 class PromptStudioApp {
   private mainWindow: BrowserWindow | null = null
   private menuBarWindow: BrowserWindow | null = null
@@ -277,14 +285,27 @@ class PromptStudioApp {
       }
     })
 
+    // Closing the window keeps the app running in the tray; it only quits from the tray menu ("Sair")
     this.mainWindow.on('close', (event) => {
       if (!this.isQuitting) {
         event.preventDefault()
         if (this.mainWindow) {
           this.mainWindow.hide()
         }
+        void this.showTrayNoticeOnce()
       }
     })
+
+    // Pinning the running window to the taskbar pins the same command, name and icon as the shortcut
+    if (process.platform === 'win32' && !this.isDev && !app.isPackaged) {
+      const icoPath = this.getAppIcoPath()
+      this.mainWindow.setAppDetails({
+        appId: APP_USER_MODEL_ID,
+        relaunchCommand: `"${process.execPath}" "${app.getAppPath()}"`,
+        relaunchDisplayName: 'Prompt Studio',
+        ...(icoPath ? { appIconPath: icoPath, appIconIndex: 0 } : {}),
+      })
+    }
 
     // Add keyboard shortcut to toggle dev tools
     if (this.isDev) {
@@ -533,7 +554,7 @@ class PromptStudioApp {
       },
     ])
 
-    this.tray.setToolTip('Prompt Studio')
+    this.tray.setToolTip('Prompt Studio (clique para abrir; botão direito para sair)')
     this.tray.setContextMenu(contextMenu)
 
     this.tray.on('click', async () => {
@@ -551,7 +572,37 @@ class PromptStudioApp {
     }
   }
 
+  // Tells, once, that closing the window did not quit the app
+  private async showTrayNoticeOnce(): Promise<void> {
+    if (!this.tray || !this.db || process.platform !== 'win32') return
+    try {
+      if ((await getSetting(this.db, TRAY_NOTICE_SETTING)) === 'true') return
+      await setSetting(this.db, TRAY_NOTICE_SETTING, 'true')
+      this.tray.displayBalloon({
+        iconType: 'info',
+        title: 'O Prompt Studio continua aberto',
+        content: 'Ele fica no ícone perto do relógio (setinha ^). Para fechar de vez, clique com o botão direito no ícone e escolha "Sair".',
+      })
+    } catch (error) {
+      console.error('Could not show the tray notice:', error)
+    }
+  }
+
+  private getAppIcoPath(): string {
+    const icoPath = join(__dirname, '../assets/icon.ico')
+    return existsSync(icoPath) ? icoPath : ''
+  }
+
   private createTrayIcon(): Electron.NativeImage {
+    // Windows: the colored app icon (the template icon below is white, made for the macOS menu bar,
+    // and disappears on a light taskbar). The .ico brings the 16/24/32 px versions for any DPI.
+    if (process.platform === 'win32') {
+      const icoPath = this.getAppIcoPath()
+      if (icoPath) return nativeImage.createFromPath(icoPath)
+      const pngPath = join(__dirname, '../assets/icon.png')
+      if (existsSync(pngPath)) return nativeImage.createFromPath(pngPath).resize({ width: 32, height: 32, quality: 'best' })
+    }
+
     const trayIconPath = join(__dirname, '../assets/tray-icon.png')
     if (existsSync(trayIconPath)) {
       const icon = nativeImage.createFromPath(trayIconPath)

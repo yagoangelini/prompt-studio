@@ -72,7 +72,7 @@ class QuickPasteController {
       return this.getStatus()
     })
 
-    ipcMain.handle(QUICK_PASTE_CHANNELS.copy, (_event, text: unknown, promptId: unknown) => {
+    ipcMain.handle(QUICK_PASTE_CHANNELS.copy, async (event, text: unknown, promptId: unknown) => {
       if (typeof text !== 'string') return { success: false, error: 'Texto inválido.' }
       try {
         clipboard.writeText(text)
@@ -81,6 +81,8 @@ class QuickPasteController {
         return { success: false, error: 'Não foi possível copiar para a área de transferência.' }
       }
       this.recordUsage(promptId)
+      // Copied from the quick paste window: back to the app where it will be pasted
+      if (this.isQuickPasteSender(event)) await this.hideAndReturnFocus()
       return { success: true }
     })
 
@@ -377,18 +379,37 @@ class QuickPasteController {
     if (!window || window.isDestroyed() || !window.isVisible()) return
     const wasFocused = window.isFocused()
     window.hide()
-    if (giveFocusBack && wasFocused) this.returnFocus()
+    if (giveFocusBack && wasFocused) void this.returnFocus()
   }
 
-  private returnFocus(): void {
+  private returnFocus(): Promise<void> {
     const own = this.target.ownWindow
     if (own && !own.isDestroyed() && own.isVisible()) {
       own.focus()
     } else if (process.platform === 'darwin') {
       // Hiding a window does not deactivate the app on macOS
       app.hide()
+    } else if (process.platform === 'win32' && this.target.hwnd) {
+      // Windows keeps the hidden popup as the foreground window (the focus goes nowhere), so the
+      // field the user was typing in must get the focus back explicitly
+      return this.keystroke.ensureForeground(this.target.hwnd)
     }
-    // Windows and Linux give the focus back to the previous window by themselves
+    // Linux gives the focus back to the previous window by itself
+    return Promise.resolve()
+  }
+
+  private isQuickPasteSender(event: IpcMainInvokeEvent): boolean {
+    const window = this.window
+    return window !== null && !window.isDestroyed() && event.sender === window.webContents
+  }
+
+  // Only copied (Ctrl+Enter, or automatic paste off): close right away so Ctrl+V works at once
+  private async hideAndReturnFocus(): Promise<void> {
+    this.clearTimers()
+    const window = this.window
+    if (!window || window.isDestroyed() || !window.isVisible()) return
+    window.hide()
+    await this.returnFocus()
   }
 
   private clearTimers(): void {
@@ -414,7 +435,11 @@ class QuickPasteController {
 
       const window = this.window
       const fromQuickPaste = window !== null && !window.isDestroyed() && event.sender === window.webContents
-      if (!fromQuickPaste || !this.settings.autoPaste) return { success: true, pasted: false }
+      if (!fromQuickPaste) return { success: true, pasted: false }
+      if (!this.settings.autoPaste) {
+        await this.hideAndReturnFocus()
+        return { success: true, pasted: false }
+      }
 
       if (!this.keystroke.support().available) {
         this.keystroke.requestPermission()
@@ -425,7 +450,7 @@ class QuickPasteController {
       const { hwnd } = this.target
       window.hide()
       // Windows: the helper waits for (and if needed restores) the focus on the captured window
-      if (process.platform !== 'win32' || !hwnd) this.returnFocus()
+      if (process.platform !== 'win32' || !hwnd) await this.returnFocus()
       const outcome = await this.keystroke.paste(hwnd, popupHwnd)
       if (!outcome.pasted && !window.isDestroyed()) {
         // Show the notice without taking the focus away from the app the user is in

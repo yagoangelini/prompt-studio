@@ -66,7 +66,18 @@ Um aplicativo desktop poderoso para gerenciar, organizar e testar prompts de IA 
 
 ## 🚀 Início rápido
 
-### Opção 1: usando o script de execução (recomendado)
+### Uso diário no Windows: atalho sem terminal (recomendado)
+
+Dê dois cliques em `scripts\criar-atalho.bat` (uma vez só). Ele compila o app e cria o atalho **Prompt Studio** na Área de Trabalho, que abre o app sem nenhuma janela de terminal.
+
+- **Barra de tarefas:** clique com o botão direito no atalho > **Mostrar mais opções** > **Fixar na barra de tarefas** (ou, com o app aberto, clique com o botão direito no botão dele na barra de tarefas > **Fixar na barra de tarefas**).
+- **Fechar a janela não encerra o app:** ele continua rodando no ícone da área de notificação (setinha ^ perto do relógio), com o colar rápido e o servidor MCP funcionando. Clicar no botão da barra de tarefas ou no ícone traz a janela de volta.
+- **Para encerrar de vez:** botão direito no ícone da área de notificação > **Sair**.
+- Depois de atualizar o código, rode `scripts\criar-atalho.bat` de novo para recompilar.
+
+> Dica: para o ícone ficar sempre visível (fora da setinha), arraste-o da setinha para a barra de tarefas, ou ative-o em Configurações do Windows > Personalização > Barra de tarefas > Outros ícones da bandeja do sistema.
+
+### Opção 1: usando o script de execução (modo de desenvolvimento)
 
 **Unix/macOS/Linux:**
 ```bash

@@ -9,3 +9,6 @@ recuperacao/
 *.db-shm
 
 *.tsbuildinfo
+
+# Shortcut created by scripts/criar-atalho.cjs (points to this computer's paths)
+*.lnk

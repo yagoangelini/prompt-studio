@@ -11,6 +11,8 @@
     "build:mac": "cross-env NODE_ENV=production vite build && electron-builder --mac",
     "build:win": "cross-env NODE_ENV=production vite build && electron-builder --win",
     "build:linux": "cross-env NODE_ENV=production vite build && electron-builder --linux",
+    "build:app": "cross-env NODE_ENV=production vite build",
+    "atalho": "npm run build:app && electron scripts/criar-atalho.cjs",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env IS_DEV=true electron .",
     "electron:pack": "electron-builder",
